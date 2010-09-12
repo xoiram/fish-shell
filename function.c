@@ -335,25 +335,6 @@ void function_set_desc( const wchar_t *name, const wchar_t *desc )
 	data->description = halloc_wcsdup( data, desc );
 }
 
-/**
-   Search arraylist of strings for specified string
-*/
-static int al_contains_str( array_list_t *list, const wchar_t * str )
-{
-	int i;
-
-	CHECK( list, 0 );
-	CHECK( str, 0 );
-	
-	for( i=0; i<al_get_count( list ); i++ )
-	{
-		if( wcscmp( al_get( list, i ), str) == 0 )
-		{
-			return 1;
-		}
-	}
-	return 0;
-}
 	
 /**
    Helper function for removing hidden functions 

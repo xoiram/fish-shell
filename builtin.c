@@ -1455,6 +1455,214 @@ static int builtin_functions( wchar_t **argv )
 
 }
 
+/**
+   The listeners builtin, used to show what functions are registered to receive
+   events, signals, and other notifications.
+*/
+static int builtin_listeners( wchar_t **argv )
+{
+	/*
+	    NOTE: Unsure whether this functionality should be rolled into the responibilities
+	      of 'functions'. My thinking is doing so would clutter 'functions' a bit 
+	      too much, but that mightn't justify a whole builtin like this.
+	*/
+	int argc = builtin_count_args( argv );
+	int res=STATUS_BUILTIN_OK;
+	event_t search_ev;
+	array_list_t *events = 0;
+	int i;
+	//wchar_t *specifier = 0;
+	pid_t pid = 0;
+	int job_id = 0;
+	wchar_t *end = 0;	
+		
+	woptind=0;
+	search_ev.function_name = 0; // won't be needing this here.
+	
+	const static struct woption
+		long_options[] =
+		{
+			{
+				L"event", required_argument, 0, 'e'
+			}
+			,
+			{
+				L"signal", required_argument, 0, 's'
+			}
+			,
+			{
+				L"variable", required_argument, 0, 'v'
+			}
+			,
+			{
+				L"process-exit", required_argument, 0, 'p'
+			}
+			,
+			{
+				L"job-exit", required_argument, 0, 'j'
+			}
+			,
+			{
+				L"help", no_argument, 0, 'h'
+			}
+			,
+			{
+				0, 0, 0, 0
+			}
+		}
+	;
+
+	events = al_new();
+
+	while ( !res )
+	{
+		int opt_idx = 0;
+
+		int opt = wgetopt_long( argc, argv,
+		                        L"e:s:v:p:j:h",
+		                        long_options,
+		                        &opt_idx );
+
+		if( opt == -1 )
+			break;
+
+		search_ev.type = -1;
+
+		switch( opt )
+		{
+			case 0:
+				if(long_options[opt_idx].flag != 0)
+					break;
+				sb_printf( sb_err,
+				           BUILTIN_ERR_UNKNOWN,
+				           argv[0],
+				           long_options[opt_idx].name );
+
+				res = STATUS_BUILTIN_ERROR;
+				break;
+
+			case 'e':
+				search_ev.type = EVENT_GENERIC;
+				search_ev.param1.param = woptarg;
+
+				//event_get(&search_ev, events);
+				break;
+
+			case 's':
+				i = wcs2sig( woptarg );
+				
+				if( i == -1 )
+				{
+					sb_printf( sb_err,
+					           _(L"%ls: Invalid signal 's'\n"),
+					           argv[0],
+					           woptarg );
+
+					res = STATUS_BUILTIN_ERROR;
+					break;
+				}
+				
+				search_ev.type = EVENT_SIGNAL;
+				search_ev.param1.signal = i;
+
+				//event_get( &search_ev, events );
+				break;
+
+			case 'v':
+				if( wcsvarname(woptarg) != 0 )
+				{
+					sb_printf( sb_err,
+					           _(L"%ls: Invalid variable name '%ls'\n"),
+					           argv[0], woptarg );
+					res = STATUS_BUILTIN_ERROR;
+					break;
+				}
+				search_ev.type = EVENT_VARIABLE;
+				search_ev.param1.variable = woptarg;
+				//event_get( &search_ev, events );
+				break;
+
+			case 'j':
+				job_id = 0;
+				end = 0;
+
+				errno = 0;
+				pid = wcstol( woptarg, &end, 10 );
+				if( errno || !end || *end )
+				{
+					sb_printf( sb_err,
+							   _( L"%ls: Invalid job id %ls\n" ),
+							   argv[0],
+							   woptarg );
+					res = STATUS_BUILTIN_ERROR;
+					break;
+				}
+				search_ev.type = EVENT_JOB_ID;
+				search_ev.param1.job_id = job_id;
+				//event_get( &search_ev, events );
+				break;
+				
+			case 'p':
+				end = 0;
+
+				errno = 0;
+				pid = wcstol( woptarg, &end, 10 );
+				if( errno || !end || *end )
+				{
+					sb_printf( sb_err,
+							   _( L"%ls: Invalid process id %ls\n" ),
+							   argv[0],
+							   woptarg );
+					res = STATUS_BUILTIN_ERROR;
+					break;
+				}
+
+				search_ev.type = EVENT_EXIT;
+				search_ev.param1.pid = pid;
+				//event_get( &search_ev, events );
+				break;
+
+			case 'h':
+				builtin_print_help( argv[0], sb_out );
+				return STATUS_BUILTIN_OK;
+		}
+		if( (res == STATUS_BUILTIN_OK) && (search_ev.type != -1) )
+			event_get( &search_ev, events );
+	}
+
+	if( res == STATUS_BUILTIN_OK )
+	{
+		array_list_t *function_names = al_new();
+		event_t *event;
+		
+		for( i=0; i<al_get_count( events ); i++ )
+		{
+			event = (event_t *) al_get( events, i );
+			if( !event || (event->function_name == 0) )
+				continue;
+			
+			if( !al_contains_str( function_names, event->function_name ) )
+				al_push( function_names, event->function_name );
+		}
+		if( al_get_count( function_names ) )
+		{
+			sort_list( function_names );
+			for( i=0; i<al_get_count( function_names ); i++ )
+			{
+				sb_append( sb_out, al_get( function_names, i ), L"\n", (void *)0 );
+			}
+		}
+
+		al_destroy( function_names );
+	}
+	else
+	{
+		return res;
+	}
+
+	al_destroy( events );
+	return STATUS_BUILTIN_OK;
+}
 
 /**
    The function builtin, used for providing subroutines.
@@ -3719,6 +3927,10 @@ const static builtin_data_t builtin_data[]=
 	,
 	{
 		L"breakpoint",  &builtin_breakpoint, N_( L"Temporarily halt execution of a script and launch an interactive debug prompt" )  
+	}
+	,
+	{
+		L"listeners", &builtin_listeners, N_(L"Show list of functions listening for events, signals, and other notifications.") 
 	}
 	,
 
