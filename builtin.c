@@ -1544,8 +1544,6 @@ static int builtin_listeners( wchar_t **argv )
 			case 'e':
 				search_ev.type = EVENT_GENERIC;
 				search_ev.param1.param = woptarg;
-
-				//event_get(&search_ev, events);
 				break;
 
 			case 's':
@@ -1564,8 +1562,6 @@ static int builtin_listeners( wchar_t **argv )
 				
 				search_ev.type = EVENT_SIGNAL;
 				search_ev.param1.signal = i;
-
-				//event_get( &search_ev, events );
 				break;
 
 			case 'v':
@@ -1579,7 +1575,6 @@ static int builtin_listeners( wchar_t **argv )
 				}
 				search_ev.type = EVENT_VARIABLE;
 				search_ev.param1.variable = woptarg;
-				//event_get( &search_ev, events );
 				break;
 
 			case 'j':
@@ -1599,7 +1594,6 @@ static int builtin_listeners( wchar_t **argv )
 				}
 				search_ev.type = EVENT_JOB_ID;
 				search_ev.param1.job_id = job_id;
-				//event_get( &search_ev, events );
 				break;
 				
 			case 'p':
@@ -1619,7 +1613,6 @@ static int builtin_listeners( wchar_t **argv )
 
 				search_ev.type = EVENT_EXIT;
 				search_ev.param1.pid = pid;
-				//event_get( &search_ev, events );
 				break;
 
 			case 'h':
