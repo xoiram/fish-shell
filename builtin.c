@@ -1456,50 +1456,54 @@ static int builtin_functions( wchar_t **argv )
 }
 
 /**
-   The listeners builtin, used to show what functions are registered to receive
+   The funcevents builtin, used to show what functions are registered to receive
    events, signals, and other notifications.
+   Also provides ability to alter which notifications a function is registered for.
 */
-static int builtin_listeners( wchar_t **argv )
+static int builtin_funcevents( wchar_t **argv )
 {
-	/*
-	    NOTE: Unsure whether this functionality should be rolled into the responibilities
-	      of 'functions'. My thinking is doing so would clutter 'functions' a bit 
-	      too much, but that mightn't justify a whole builtin like this.
-	*/
 	int argc = builtin_count_args( argv );
 	int res=STATUS_BUILTIN_OK;
 	event_t search_ev;
 	array_list_t *events = 0;
+	dyn_queue_t *target_events = 0;
 	int i;
-	//wchar_t *specifier = 0;
+	wchar_t *target_function = 0;
 	pid_t pid = 0;
 	int job_id = 0;
-	wchar_t *end = 0;	
+	wchar_t *end = 0;
+	int remove = 0;
 		
 	woptind=0;
-	search_ev.function_name = 0; // won't be needing this here.
+	search_ev.function_name = 0;
 	
 	const static struct woption
 		long_options[] =
 		{
 			{
-				L"event", required_argument, 0, 'e'
+				L"on-event", required_argument, 0, 'e'
 			}
 			,
 			{
-				L"signal", required_argument, 0, 's'
+				L"on-signal", required_argument, 0, 's'
 			}
 			,
 			{
-				L"variable", required_argument, 0, 'v'
+				L"on-variable", required_argument, 0, 'v'
 			}
 			,
 			{
-				L"process-exit", required_argument, 0, 'p'
+				L"on-process-exit", required_argument, 0, 'p'
 			}
 			,
 			{
-				L"job-exit", required_argument, 0, 'j'
+				L"on-job-exit", required_argument, 0, 'j'
+			}
+			,
+			{
+				// No argument, but needs to be used alongside the event-type
+				// specifier (e,s,v,p,j) and a function name positional param.
+				L"remove", no_argument, 0, 'r'
 			}
 			,
 			{
@@ -1513,13 +1517,17 @@ static int builtin_listeners( wchar_t **argv )
 	;
 
 	events = al_new();
+	target_events = ( dyn_queue_t * ) malloc( sizeof(dyn_queue_t) );
+	if( !target_events )
+		DIE_MEM();
+	q_init( target_events );
 
 	while ( !res )
 	{
 		int opt_idx = 0;
 
 		int opt = wgetopt_long( argc, argv,
-		                        L"e:s:v:p:j:h",
+		                        L"e:s:v:p:j:rh",
 		                        long_options,
 		                        &opt_idx );
 
@@ -1549,10 +1557,10 @@ static int builtin_listeners( wchar_t **argv )
 			case 's':
 				i = wcs2sig( woptarg );
 				
-				if( i == -1 )
+				if( i < 0 )
 				{
 					sb_printf( sb_err,
-					           _(L"%ls: Invalid signal 's'\n"),
+					           _(L"%ls: Invalid signal '%ls'\n"),
 					           argv[0],
 					           woptarg );
 
@@ -1615,46 +1623,108 @@ static int builtin_listeners( wchar_t **argv )
 				search_ev.param1.pid = pid;
 				break;
 
+			case 'r':
+				remove = 1;
+				break;
+
 			case 'h':
 				builtin_print_help( argv[0], sb_out );
 				return STATUS_BUILTIN_OK;
 		}
 		if( (res == STATUS_BUILTIN_OK) && (search_ev.type != -1) )
+		{
 			event_get( &search_ev, events );
+
+			// Remember for later, in case we need to add/remove
+			event_t *e = malloc( sizeof( event_t ) );
+			if( !e )
+				DIE_MEM();
+			// Only need a shallow copy for our purposes.
+			memcpy( e, &search_ev, sizeof(event_t) );
+			q_put( target_events, e );
+		}
 	}
 
 	if( res == STATUS_BUILTIN_OK )
 	{
-		array_list_t *function_names = al_new();
-		event_t *event;
+		// Supplied a function name? If not, we're listing instead of editing.
+		if( argc-woptind == 0 )
+		{
+			array_list_t *function_names = al_new();
+			event_t *event;
 		
-		for( i=0; i<al_get_count( events ); i++ )
-		{
-			event = (event_t *) al_get( events, i );
-			if( !event || (event->function_name == 0) )
-				continue;
-			
-			if( !al_contains_str( function_names, event->function_name ) )
-				al_push( function_names, event->function_name );
-		}
-		if( al_get_count( function_names ) )
-		{
-			sort_list( function_names );
-			for( i=0; i<al_get_count( function_names ); i++ )
+			for( i=0; i<al_get_count( events ); i++ )
 			{
-				sb_append( sb_out, al_get( function_names, i ), L"\n", (void *)0 );
+				event = (event_t *) al_get( events, i );
+				if( !event || (event->function_name == 0) )
+					continue;
+			
+				if( !al_contains_str( function_names, event->function_name ) )
+					al_push( function_names, event->function_name );
+			}
+			if( al_get_count( function_names ) )
+			{
+				sort_list( function_names );
+				for( i=0; i<al_get_count( function_names ); i++ )
+				{
+					sb_append( sb_out, al_get( function_names, i ), L"\n", (void *)0 );
+				}
+			}
+
+			al_destroy( function_names );
+		}
+		else if( argc-woptind == 1 )
+		{
+			target_function = argv[woptind];
+			if( !function_exists( target_function ) )
+			{
+				sb_printf( sb_err,
+						   _( L"%ls: function does not exist: '%ls'\n"),
+						   argv[0],
+						   target_function );
+				res = STATUS_BUILTIN_ERROR;
+			}
+			else
+			{
+				event_t *event = 0;
+
+				while( !q_empty( target_events ) )
+				{
+					event = (event_t *) q_get( target_events );
+					event->function_name = target_function;
+				
+					if( remove )
+					{
+						event_remove( event );
+					}
+					else
+					{
+						event_add_handler( event );
+					}
+
+					free( event ); // event_add_handler makes its own deep-copy.
+				}
 			}
 		}
-
-		al_destroy( function_names );
+		else
+		{
+			sb_printf( sb_err,
+					   _( L"%ls: Expected one function name as argument, got %d\n" ),
+					   argv[0],
+					   argc-woptind );
+			res = STATUS_BUILTIN_ERROR;
+		}
 	}
-	else
-	{
-		return res;
-	}
 
+	while( !q_empty( target_events ) )
+		free( q_get( target_events ) );
+	q_destroy( target_events );
+	free( target_events );
+	
 	al_destroy( events );
-	return STATUS_BUILTIN_OK;
+	free( events );
+	
+	return res;
 }
 
 /**
@@ -3923,7 +3993,7 @@ const static builtin_data_t builtin_data[]=
 	}
 	,
 	{
-		L"listeners", &builtin_listeners, N_(L"Show list of functions listening for events, signals, and other notifications.") 
+		L"funcevents", &builtin_funcevents, N_(L"Show/Alter list of functions listening for events, signals, and other notifications.") 
 	}
 	,
 
