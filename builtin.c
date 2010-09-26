@@ -1648,7 +1648,7 @@ static int builtin_funcevents( wchar_t **argv )
 	if( res == STATUS_BUILTIN_OK )
 	{
 		// Supplied a function name? If not, we're listing instead of editing.
-		if( argc-woptind == 0 )
+		if( ( argc-woptind == 0 ) && ( !remove ) )
 		{
 			array_list_t *function_names = al_new();
 			event_t *event;
