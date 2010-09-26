@@ -1455,6 +1455,37 @@ static int builtin_functions( wchar_t **argv )
 
 }
 
+
+// Helper function for builtin_funcevents(). 
+// Displays all notification subscriptions (on-event/variable/signal, etc) that
+// the given function is registered to receive.
+static void funcevents_display_subscriptions( wchar_t *function_name )
+{
+	event_t search_ev;
+	array_list_t events;
+	int num_of_events = 0;
+	int idx = 0;
+	
+	search_ev.type = EVENT_ANY;
+	search_ev.function_name = function_name;
+
+	al_init( &events );
+	num_of_events = event_get( &search_ev, &events );
+
+	if( num_of_events )
+	{
+		event_t *event = 0;
+		
+		for( idx=0; idx < num_of_events; idx++ )
+		{
+			event = (event_t *) al_get( &events, idx );
+			sb_printf( sb_out, L"%ls\n", event_get_desc( event ) );
+		}
+	}
+
+	al_destroy( &events );
+}
+
 /**
    The funcevents builtin, used to show what functions are registered to receive
    events, signals, and other notifications.
@@ -1686,23 +1717,32 @@ static int builtin_funcevents( wchar_t **argv )
 			}
 			else
 			{
-				event_t *event = 0;
-
-				while( !q_empty( target_events ) )
+				if( q_empty( target_events ) )
 				{
-					event = (event_t *) q_get( target_events );
-					event->function_name = target_function;
-				
-					if( remove )
-					{
-						event_remove( event );
-					}
-					else
-					{
-						event_add_handler( event );
-					}
+					// No event types specified, only a function name.
+					// So, just display all events this function is listening for.
+					funcevents_display_subscriptions( target_function );
+				}
+				else
+				{
+					event_t *event = 0;
 
-					free( event ); // event_add_handler makes its own deep-copy.
+					while( !q_empty( target_events ) )
+					{
+						event = (event_t *) q_get( target_events );
+						event->function_name = target_function;
+				
+						if( remove )
+						{
+							event_remove( event );
+						}
+						else
+						{
+							event_add_handler( event );
+						}
+
+						free( event ); // event_add_handler makes its own deep-copy.
+					}
 				}
 			}
 		}
