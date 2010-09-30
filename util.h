@@ -567,6 +567,11 @@ void al_foreach( array_list_t *l, void (*func)( void * ));
 void al_foreach2( array_list_t *l, void (*func)( void *, void *), void *aux);
 
 /**
+   Search arraylist of strings for specified string
+*/
+int al_contains_str( array_list_t *list, const wchar_t * str );
+
+/**
    Compares two wide character strings with an (arguably) intuitive
    ordering.
 
