@@ -2518,7 +2518,7 @@ static int builtin_read( wchar_t **argv )
 	/*
 	  Check if we should read interactively using \c reader_readline()
 	*/
-	if( isatty(0) && builtin_stdin == 0 )
+	if( is_interactive && builtin_stdin == 0 )
 	{
 		wchar_t *line;
 
