@@ -1,0 +1,6 @@
+FOOIDX is now 1
+bar.1
+testfn
+FOOIDX is now 2
+bar.2
+handler for generic event “foo”

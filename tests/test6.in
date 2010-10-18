@@ -1,0 +1,41 @@
+#
+#Test basic funcevents behavior
+#
+
+function testfn --on-event=foo
+	echo bar.$FOOIDX
+end
+
+function show_idx_change --on-variable=FOOIDX
+	echo FOOIDX is now $FOOIDX
+end
+
+set FOOIDX 1
+
+# should print 'bar.1'
+emit foo
+
+# should print 'testfn'
+funcevents -e foo
+
+# no function name - should give an error
+funcevents -r -e foo
+
+# this time it should work
+funcevents -r -e foo testfn
+
+# should no longer print anything
+emit foo
+
+# too many functions - should give error
+funcevents -e foo testfn show_idx_change
+
+funcevents -e foo testfn
+set FOOIDX 2
+
+# should print 'bar.2'
+emit foo
+
+# show descriptions of current subscriptions
+funcevents testfn
+

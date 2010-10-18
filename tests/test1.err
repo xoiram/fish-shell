@@ -1,0 +1,11 @@
+functions: Function 'bar' already exists. Cannot create copy 'foo'
+Standard input: functions -c foo bar
+                ^
+
+       functions - print or erase functions
+
+   [1mS[30m[m(B[1my[30m[m(B[1mn[30m[m(B[1mo[30m[m(B[1mp[30m[m(B[1ms[30m[m(B[1mi[30m[m(B[1ms[30m[m(B
+       functions [-e] FUNCTIONS...
+
+functions: Type “help functions” for related documentation
+

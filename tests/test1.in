@@ -27,17 +27,21 @@ else
 end
 
 function foo 
-    printf 'Test %s' $1; echo ' pass'
+    printf 'Test %s' $argv[1]; echo ' pass'
 end
 
 foo 3 
+
+functions -c foo bar
+foo 4
+bar 5
 
 for i in Test for continue break and switch builtins problems;
 	switch $i
 		case Test
 			printf "%s " $i 
 		case "f??"
-			printf "%s " 3
+			printf "%s " 6
 		case "c*"
 			echo pass
 		case break
@@ -51,3 +55,5 @@ for i in Test for continue break and switch builtins problems;
 	end
 end
 
+# this should yield an error
+functions -c foo bar

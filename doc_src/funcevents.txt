@@ -1,0 +1,52 @@
+\section funcevents funcevents - show/edit which functions are receiving event, signal, variable change, and exit notifications.
+ 
+\subsection function-synopsis Synopsis
+ 
+<code>funcevents [OPTIONS] [function_name]</code>
+ 
+\subsection funcevents-description Description
+ 
+This builtin command is used to show which functions are registered to receive 
+events, signals, and any other notifications that functions can listen for.
+ 
+It also allows adding and removing these notification registrations after the
+function has been defined.
+ 
+OPTIONS:
+- NOTIFICAION TYPES
+  - <code>-e EVENTNAME</code> or <code>--on-event=EVENTNAME</code> functions that will be notified when the given event is triggered.
+  - <code>-s SIG</code> or <code>--on-signal=SIG</code> functions that will be notified when the given signal is received.
+  - <code>-v NAME</code> or <code>--on-variable=NAME</code> functions that will be notified when the given variable is altered. 
+  - <code>-p PID</code> or <code>--on-process-exit=PID</code> functions that will be notified when the given process exits.
+  - <code>-j JOBID</code> or <code>--on-job-exit=JOBID</code> functions that will be notified when the given job exits.
+- <code>-r</code> or <code>--remove</code> remove a function from the receiving list, for the given target event types. 
+- <code>-h</code> or <code>--help</code> display a help message and exit
+ 
+If only the notification types are given, without <code>function_name</code>, all 
+functions registered to receive matching notifications will be displayed.
+ 
+If <code>function_name</code> is given, that function will be registered to handle the 
+given notification types. To unregister, the <code>remove</code> flag should also be supplied.
+ 
+If no notification types are specified, but <code>function_name</code> is given, the 
+descriptions of all notifications being handled by this function will be 
+displayed.
+ 
+\subsection funcevents-example Example
+ 
+Adding a function to the list of handlers:<pre>
+	funcevents --on-event=taskfinished myhandler_function
+</pre>
+ 
+Display functions handling an event:<pre>
+	funcevents --on-event=taskfinished
+</pre>
+ 
+Display all notifications a function is listening for:<pre>
+	funcevents myhandler_function
+</pre>
+ 
+Remove a function from the notification list:<pre>
+	funcevents -r --on-event=taskfinished myhandler_function
+</pre>
+

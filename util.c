@@ -897,6 +897,28 @@ int al_insert( array_list_t *a, int pos, int count )
 	return 1;
 }
 
+
+/**
+   Search arraylist of strings for specified string
+*/
+int al_contains_str( array_list_t *list, const wchar_t * str )
+{
+	int i;
+
+	CHECK( list, 0 );
+	CHECK( str, 0 );
+	
+	for( i=0; i<al_get_count( list ); i++ )
+	{
+		if( wcscmp( al_get( list, i ), str) == 0 )
+		{
+			return 1;
+		}
+	}
+	return 0;
+}
+
+
 /**
    Real implementation of all al_set_* versions. Sets arbitrary
    element of list.

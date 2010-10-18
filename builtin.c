@@ -1252,6 +1252,7 @@ static int builtin_functions( wchar_t **argv )
 	int show_hidden=0;
 	int res = STATUS_BUILTIN_OK;
 	int query = 0;
+	int copy = 0;
 
 	woptind=0;
 
@@ -1283,6 +1284,10 @@ static int builtin_functions( wchar_t **argv )
 			}
 			,
 			{
+				L"copy", no_argument, 0, 'c'
+			}
+			,
+			{
 				0, 0, 0, 0
 			}
 		}
@@ -1294,7 +1299,7 @@ static int builtin_functions( wchar_t **argv )
 
 		int opt = wgetopt_long( argc,
 								argv,
-								L"ed:nahq",
+								L"ed:nahqc",
 								long_options,
 								&opt_index );
 		if( opt == -1 )
@@ -1305,10 +1310,10 @@ static int builtin_functions( wchar_t **argv )
 			case 0:
 				if(long_options[opt_index].flag != 0)
 					break;
-                sb_printf( sb_err,
-                           BUILTIN_ERR_UNKNOWN,
-                           argv[0],
-                           long_options[opt_index].name );
+				sb_printf( sb_err,
+						   BUILTIN_ERR_UNKNOWN,
+						   argv[0],
+						   long_options[opt_index].name );
 				builtin_print_help( argv[0], sb_err );
 
 
@@ -1338,6 +1343,10 @@ static int builtin_functions( wchar_t **argv )
 				query = 1;
 				break;
 
+			case 'c':
+				copy = 1;
+				break;
+
 			case '?':
 				builtin_unknown_option( argv[0], argv[woptind-1] );
 				return STATUS_BUILTIN_ERROR;
@@ -1347,9 +1356,9 @@ static int builtin_functions( wchar_t **argv )
 	}
 
 	/*
-	  Erase, desc, query and list are mutually exclusive
+	  Erase, desc, query, copy and list are mutually exclusive
 	*/
-	if( (erase + (!!desc) + list + query) > 1 )
+	if( (erase + (!!desc) + list + query + copy) > 1 )
 	{
 		sb_printf( sb_err,
 				   _( L"%ls: Invalid combination of options\n" ),
@@ -1434,6 +1443,61 @@ static int builtin_functions( wchar_t **argv )
 		al_destroy( &names );
 		return STATUS_BUILTIN_OK;
 	}
+	else if( copy )
+	{
+		wchar_t *current_func;
+		wchar_t *new_func;
+		
+		if( argc-woptind != 2 )
+		{
+			sb_printf( sb_err,
+					   _( L"%ls: Expected exactly two names (current function name, and new function name)\n" ),
+					   argv[0] );
+			builtin_print_help ( argv[0], sb_err );
+			
+			return STATUS_BUILTIN_ERROR;
+		}
+		current_func = argv[woptind];
+		new_func = argv[woptind+1];
+		
+		if( !function_exists( current_func ) )
+		{
+			sb_printf( sb_err,
+					   _( L"%ls: Function '%ls' does not exist\n" ),
+					   argv[0],
+					   current_func );
+			builtin_print_help( argv[0], sb_err );
+
+			return STATUS_BUILTIN_ERROR;
+		}
+
+		if( (wcsfuncname( new_func ) != 0) || parser_keywords_is_reserved( new_func ) )
+		{
+			sb_printf( sb_err,
+			           _( L"%ls: Illegal function name '%ls'\n"),
+			           argv[0],
+			           new_func );
+			builtin_print_help( argv[0], sb_err );
+			return STATUS_BUILTIN_ERROR;
+		}
+
+		// keep things simple: don't allow existing names to be copy targets.
+		if( function_exists( new_func ) )
+		{
+			sb_printf( sb_err,
+					   _( L"%ls: Function '%ls' already exists. Cannot create copy '%ls'\n" ),
+					   argv[0],
+					   new_func,
+					   current_func );            
+			builtin_print_help( argv[0], sb_err );
+
+			return STATUS_BUILTIN_ERROR;
+		}
+
+		if( function_copy( current_func, new_func ) )
+			return STATUS_BUILTIN_OK;
+		return STATUS_BUILTIN_ERROR;
+	}
 
 	for( i=woptind; i<argc; i++ )
 	{
@@ -1455,6 +1519,317 @@ static int builtin_functions( wchar_t **argv )
 
 }
 
+
+// Helper function for builtin_funcevents(). 
+// Displays all notification subscriptions (on-event/variable/signal, etc) that
+// the given function is registered to receive.
+static void funcevents_display_subscriptions( wchar_t *function_name )
+{
+	event_t search_ev;
+	array_list_t events;
+	int num_of_events = 0;
+	int idx = 0;
+	
+	search_ev.type = EVENT_ANY;
+	search_ev.function_name = function_name;
+
+	al_init( &events );
+	num_of_events = event_get( &search_ev, &events );
+
+	if( num_of_events )
+	{
+		event_t *event = 0;
+		
+		for( idx=0; idx < num_of_events; idx++ )
+		{
+			event = (event_t *) al_get( &events, idx );
+			sb_printf( sb_out, L"%ls\n", event_get_desc( event ) );
+		}
+	}
+
+	al_destroy( &events );
+}
+
+/**
+   The funcevents builtin, used to show what functions are registered to receive
+   events, signals, and other notifications.
+   Also provides ability to alter which notifications a function is registered for.
+*/
+static int builtin_funcevents( wchar_t **argv )
+{
+	int argc = builtin_count_args( argv );
+	int res=STATUS_BUILTIN_OK;
+	event_t search_ev;
+	array_list_t *events = 0;
+	dyn_queue_t *target_events = 0;
+	int i;
+	wchar_t *target_function = 0;
+	pid_t pid = 0;
+	int job_id = 0;
+	wchar_t *end = 0;
+	int remove = 0;
+		
+	woptind=0;
+	search_ev.function_name = 0;
+	
+	const static struct woption
+		long_options[] =
+		{
+			{
+				L"on-event", required_argument, 0, 'e'
+			}
+			,
+			{
+				L"on-signal", required_argument, 0, 's'
+			}
+			,
+			{
+				L"on-variable", required_argument, 0, 'v'
+			}
+			,
+			{
+				L"on-process-exit", required_argument, 0, 'p'
+			}
+			,
+			{
+				L"on-job-exit", required_argument, 0, 'j'
+			}
+			,
+			{
+				// No argument, but needs to be used alongside the event-type
+				// specifier (e,s,v,p,j) and a function name positional param.
+				L"remove", no_argument, 0, 'r'
+			}
+			,
+			{
+				L"help", no_argument, 0, 'h'
+			}
+			,
+			{
+				0, 0, 0, 0
+			}
+		}
+	;
+
+	events = al_new();
+	target_events = ( dyn_queue_t * ) malloc( sizeof(dyn_queue_t) );
+	if( !target_events )
+		DIE_MEM();
+	q_init( target_events );
+
+	while ( !res )
+	{
+		int opt_idx = 0;
+
+		int opt = wgetopt_long( argc, argv,
+		                        L"e:s:v:p:j:rh",
+		                        long_options,
+		                        &opt_idx );
+
+		if( opt == -1 )
+			break;
+
+		search_ev.type = -1;
+
+		switch( opt )
+		{
+			case 0:
+				if(long_options[opt_idx].flag != 0)
+					break;
+				sb_printf( sb_err,
+				           BUILTIN_ERR_UNKNOWN,
+				           argv[0],
+				           long_options[opt_idx].name );
+
+				res = STATUS_BUILTIN_ERROR;
+				break;
+
+			case 'e':
+				search_ev.type = EVENT_GENERIC;
+				search_ev.param1.param = woptarg;
+				break;
+
+			case 's':
+				i = wcs2sig( woptarg );
+				
+				if( i < 0 )
+				{
+					sb_printf( sb_err,
+					           _(L"%ls: Invalid signal '%ls'\n"),
+					           argv[0],
+					           woptarg );
+
+					res = STATUS_BUILTIN_ERROR;
+					break;
+				}
+				
+				search_ev.type = EVENT_SIGNAL;
+				search_ev.param1.signal = i;
+				break;
+
+			case 'v':
+				if( wcsvarname(woptarg) != 0 )
+				{
+					sb_printf( sb_err,
+					           _(L"%ls: Invalid variable name '%ls'\n"),
+					           argv[0], woptarg );
+					res = STATUS_BUILTIN_ERROR;
+					break;
+				}
+				search_ev.type = EVENT_VARIABLE;
+				search_ev.param1.variable = woptarg;
+				break;
+
+			case 'j':
+				job_id = 0;
+				end = 0;
+
+				errno = 0;
+				pid = wcstol( woptarg, &end, 10 );
+				if( errno || !end || *end )
+				{
+					sb_printf( sb_err,
+							   _( L"%ls: Invalid job id %ls\n" ),
+							   argv[0],
+							   woptarg );
+					res = STATUS_BUILTIN_ERROR;
+					break;
+				}
+				search_ev.type = EVENT_JOB_ID;
+				search_ev.param1.job_id = job_id;
+				break;
+				
+			case 'p':
+				end = 0;
+
+				errno = 0;
+				pid = wcstol( woptarg, &end, 10 );
+				if( errno || !end || *end )
+				{
+					sb_printf( sb_err,
+							   _( L"%ls: Invalid process id %ls\n" ),
+							   argv[0],
+							   woptarg );
+					res = STATUS_BUILTIN_ERROR;
+					break;
+				}
+
+				search_ev.type = EVENT_EXIT;
+				search_ev.param1.pid = pid;
+				break;
+
+			case 'r':
+				remove = 1;
+				break;
+
+			case 'h':
+				builtin_print_help( argv[0], sb_out );
+				return STATUS_BUILTIN_OK;
+		}
+		if( (res == STATUS_BUILTIN_OK) && (search_ev.type != -1) )
+		{
+			event_get( &search_ev, events );
+
+			// Remember for later, in case we need to add/remove
+			event_t *e = malloc( sizeof( event_t ) );
+			if( !e )
+				DIE_MEM();
+			// Only need a shallow copy for our purposes.
+			memcpy( e, &search_ev, sizeof(event_t) );
+			q_put( target_events, e );
+		}
+	}
+
+	if( res == STATUS_BUILTIN_OK )
+	{
+		// Supplied a function name? If not, we're listing instead of editing.
+		if( ( argc-woptind == 0 ) && ( !remove ) )
+		{
+			array_list_t *function_names = al_new();
+			event_t *event;
+		
+			for( i=0; i<al_get_count( events ); i++ )
+			{
+				event = (event_t *) al_get( events, i );
+				if( !event || (event->function_name == 0) )
+					continue;
+			
+				if( !al_contains_str( function_names, event->function_name ) )
+					al_push( function_names, event->function_name );
+			}
+			if( al_get_count( function_names ) )
+			{
+				sort_list( function_names );
+				for( i=0; i<al_get_count( function_names ); i++ )
+				{
+					sb_append( sb_out, al_get( function_names, i ), L"\n", (void *)0 );
+				}
+			}
+
+			al_destroy( function_names );
+		}
+		else if( argc-woptind == 1 )
+		{
+			target_function = argv[woptind];
+			if( !function_exists( target_function ) )
+			{
+				sb_printf( sb_err,
+						   _( L"%ls: function does not exist: '%ls'\n"),
+						   argv[0],
+						   target_function );
+				res = STATUS_BUILTIN_ERROR;
+			}
+			else
+			{
+				if( q_empty( target_events ) )
+				{
+					// No event types specified, only a function name.
+					// So, just display all events this function is listening for.
+					funcevents_display_subscriptions( target_function );
+				}
+				else
+				{
+					event_t *event = 0;
+
+					while( !q_empty( target_events ) )
+					{
+						event = (event_t *) q_get( target_events );
+						event->function_name = target_function;
+				
+						if( remove )
+						{
+							event_remove( event );
+						}
+						else
+						{
+							event_add_handler( event );
+						}
+
+						free( event ); // event_add_handler makes its own deep-copy.
+					}
+				}
+			}
+		}
+		else
+		{
+			sb_printf( sb_err,
+					   _( L"%ls: Expected one function name as argument, got %d\n" ),
+					   argv[0],
+					   argc-woptind );
+			res = STATUS_BUILTIN_ERROR;
+		}
+	}
+
+	while( !q_empty( target_events ) )
+		free( q_get( target_events ) );
+	q_destroy( target_events );
+	free( target_events );
+	
+	al_destroy( events );
+	free( events );
+	
+	return res;
+}
 
 /**
    The function builtin, used for providing subroutines.
@@ -3719,6 +4094,10 @@ const static builtin_data_t builtin_data[]=
 	,
 	{
 		L"breakpoint",  &builtin_breakpoint, N_( L"Temporarily halt execution of a script and launch an interactive debug prompt" )  
+	}
+	,
+	{
+		L"funcevents", &builtin_funcevents, N_(L"Show/Alter list of functions listening for events, signals, and other notifications.") 
 	}
 	,
 
