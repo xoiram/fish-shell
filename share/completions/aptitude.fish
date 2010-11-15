@@ -2,7 +2,7 @@
 
 function __fish_apt_no_subcommand  --description 'Test if aptitude has yet to be given the subcommand'
 	for i in (commandline -opc)
-		if contains -- $i autoclean clean forget-new keep-all update upgrade changelog dist-upgrade download forbid-version hold install keep markauto purge reinstall remove show unhold unmarkauto search help
+		if contains -- $i autoclean clean forget-new keep-all update upgrade safe-upgrade changelog dist-upgrade full-upgrade download forbid-version hold install keep markauto purge reinstall remove show unhold unmarkauto search help
 			return 1
 		end
 	end
@@ -27,8 +27,10 @@ complete -f -n '__fish_apt_no_subcommand' -c aptitude -a 'forget-new'  --descrip
 complete -f -n '__fish_apt_no_subcommand' -c aptitude -a 'keep-all'  --description 'Cancel all scheduled actions on all packages'
 complete -f -n '__fish_apt_no_subcommand' -c aptitude -a 'update'  --description 'Update the list of available packages from the apt sources'
 complete -f -n '__fish_apt_no_subcommand' -c aptitude -a 'upgrade'  --description 'Upgrade installed packages to their most recent version'
+complete -f -n '__fish_apt_no_subcommand' -c aptitude -a 'safe-upgrade'  --description 'Upgrade installed packages to their most recent version'
 complete -f -n '__fish_apt_no_subcommand' -c aptitude -a 'changelog'  --description 'Download and displays the Debian changelog for the packages'
 complete -f -n '__fish_apt_no_subcommand' -c aptitude -a 'dist-upgrade'  --description 'Upgrade, removing or installing packages as necessary'
+complete -f -n '__fish_apt_no_subcommand' -c aptitude -a 'full-upgrade'  --description 'Upgrade, removing or installing packages as necessary'
 complete -f -n '__fish_apt_no_subcommand' -c aptitude -a 'download'  --description 'Download the packages to the current directory'
 complete -f -n '__fish_apt_no_subcommand' -c aptitude -a 'forbid-version'  --description 'Forbid the upgrade to a particular version'
 complete -f -n '__fish_apt_no_subcommand' -c aptitude -a 'hold'  --description 'Ignore the packages by future upgrade commands'
