@@ -12,7 +12,7 @@ complete -c locate -s m -l mmap --description 'Does nothing. For compatibility w
 complete -c locate -s 0 -l null --description 'Use ASCII NUL as a separator, instead of newline'
 complete -c locate -s p -l print --description 'Print search results when they normally would not'
 complete -c locate -s w -l whole-name --description 'Match against the whole name of the file'
-complete -c locate -s b -l base-name --description 'Match against the final component of the file name'
+complete -c locate -s b -l basename --description 'Match against the final component of the file name'
 complete -c locate -s r -l regex --description 'The pattern is regular expression instead of glob pattern'
 complete -c locate -s s -l stdio --description 'Does nothing. For compatibility with BSD locate'
 complete -c locate -s S -l statistics --description 'Print statistics about each locate database and exit'
