@@ -19,6 +19,7 @@ import os, sys, re
 import bash_converter
 
 config_file = None
+output_buff = ""
 prompt_buff = ""
 i = 0
 quote_started = False
@@ -97,6 +98,7 @@ def replace_outside_quotes(input, oldchar, newchar, change_all = True):
 
 #Parse input passed to the script
 def parse_input(input):
+    global output_buff
     env_regex = re.compile("(.*?)=(.*)")    
     env_regex_matched = re.search(env_regex, input)
 
@@ -115,7 +117,7 @@ def parse_input(input):
             input = input[env_regex_matched.end():]
 
         elif env_name == "PATH":
-            config_file.write("set -x " + env_name + ' ' + env_value.replace(":"," ") )
+            output_buff += "set -x " + env_name + ' ' + env_value.replace(":"," ")
             input = input[env_regex_matched.end():]
 
         else:
@@ -128,21 +130,24 @@ def parse_input(input):
                 full_value = full_value + env_value
                 input = input[one_line_matched.end():]
 
-            config_file.write("set_default " + env_name + ' "' + full_value + '"') 
+            output_buff += "set_default " + env_name + ' "' + full_value + '"'
         #Move to next line
-        config_file.write("\n")
+        output_buff += "\n"
+        config_file.write(output_buff)
+        output_buff = ""
         env_regex_matched = re.search(env_regex, input)
 
 #Add an alias as a function in fish
 def add_alias(alias_name, alias_value):
+        global output_buff
         alias_value = remove_single_quotes(alias_value)
 
 #        while contains_outside_quotes(alias_value,"`"):
 #            alias_value = replace_outside_quotes(alias_value, '`', '(', False)
 #            alias_value = replace_outside_quotes(alias_value, '`', ')', False)
 
-        config_file.write("function " + alias_name)
-        bash_converter.parse_input(alias_value, config_file)
+        output_buff += "function " + alias_name
+        output_buff = bash_converter.parse_input(alias_value, output_buff)
 #        for line in alias_value.split(";"):
 #            line = line.strip()
 #            tokens = line.split(' ')
@@ -170,7 +175,7 @@ def add_alias(alias_name, alias_value):
 #            else:
 #                    if len(line.strip()) > 0:
 #                        config_file.write( "\n\t" + line.strip() )
-        config_file.write(" $argv\nend;\n")
+        output_buff += " $argv\nend;\n"
 
 def parse_control_sequence():
     ch = next_prompt_char()

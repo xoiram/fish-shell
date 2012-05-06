@@ -84,7 +84,7 @@ def process_command(tokens):
     cmd = ' '.join(tokens)
     return cmd 
 
-def parse_input(input, config_file):
+def parse_input(input, output_buff):
     i = 0
     state = IN_WORD
 
@@ -122,11 +122,11 @@ def parse_input(input, config_file):
                 if contains_outside_quotes(tokens[0], "="):
                     tokens[0] = replace_outside_quotes(tokens[0], "=", " ", False) 
                     args = ' '.join(tokens) 
-                    config_file.write("\n\tset " + args) 
+                    output_buff += "\n\tset " + args 
                 elif tokens[0] in bash_builtins.keys():
-                    config_file.write("\n\t" + process_builtin(tokens))
+                    output_buff += "\n\t" + process_builtin(tokens)
                 else:
-                    config_file.write("\n\t" + process_command(tokens))
+                    output_buff += "\n\t" + process_command(tokens)
 
                 current_value = ""
                 del tokens[:]
@@ -177,11 +177,13 @@ def parse_input(input, config_file):
     if contains_outside_quotes(tokens[0], "="):
         tokens[0] = replace_outside_quotes(tokens[0], "=", " ", False) 
         args = ' '.join(tokens) 
-        config_file.write("\n\tset " + args) 
+        output_buff += "\n\tset " + args
     elif tokens[0] in bash_builtins.keys():
-        config_file.write("\n\t" + process_builtin(tokens))
+        output_buff += "\n\t" + process_builtin(tokens)
     else:
-        config_file.write("\n\t" + process_command(tokens))
+        output_buff += "\n\t" + process_command(tokens)
+
+    return output_buff
 
 if __name__ == "__main__":
     import sys 
