@@ -544,7 +544,6 @@ job_t::~job_t()
 {
     if (first_process != NULL)
         delete first_process;
-    io_chain_destroy(this->io);
     release_job_id(job_id);
 }
 
@@ -869,10 +868,11 @@ static int select_try(job_t *j)
 
     for (size_t idx = 0; idx < j->io.size(); idx++)
     {
-        const io_data_t *d = j->io.at(idx).get();
-        if (d->io_mode == IO_BUFFER)
+        const io_data_t *io = j->io.at(idx).get();
+        if (io->io_mode == IO_BUFFER)
         {
-            int fd = d->param1.pipe_fd[0];
+            CAST_INIT(const io_pipe_t *, io_pipe, io);
+            int fd = io_pipe->pipe_fd[0];
 //			fwprintf( stderr, L"fd %d on job %ls\n", fd, j->command );
             FD_SET(fd, &fds);
             maxfd = maxi(maxfd, fd);
@@ -902,7 +902,7 @@ static int select_try(job_t *j)
 */
 static void read_try(job_t *j)
 {
-    io_data_t *buff=NULL;
+    io_buffer_t *buff=NULL;
 
     /*
       Find the last buffer, which is the one we want to read from
@@ -912,7 +912,7 @@ static void read_try(job_t *j)
         io_data_t *d = j->io.at(idx).get();
         if (d->io_mode == IO_BUFFER)
         {
-            buff=d;
+            buff = static_cast<io_buffer_t *>(d);
         }
     }
 
@@ -924,7 +924,7 @@ static void read_try(job_t *j)
             char b[BUFFER_SIZE];
             long l;
 
-            l=read_blocked(buff->param1.pipe_fd[0],
+            l=read_blocked(buff->pipe_fd[0],
                            b, BUFFER_SIZE);
             if (l==0)
             {
