@@ -463,52 +463,52 @@ static void test_parser()
     parser_t parser(PARSER_TYPE_GENERAL, true);
 
     say(L"Testing null input to parser");
-    if (!parser.test(0, 0, 0, 0))
+    if (!parser.test(NULL))
     {
         err(L"Null input to parser.test undetected");
     }
 
     say(L"Testing block nesting");
-    if (!parser.test(L"if; end", 0, 0, 0))
+    if (!parser.test(L"if; end"))
     {
         err(L"Incomplete if statement undetected");
     }
-    if (!parser.test(L"if test; echo", 0, 0, 0))
+    if (!parser.test(L"if test; echo"))
     {
         err(L"Missing end undetected");
     }
-    if (!parser.test(L"if test; end; end", 0, 0, 0))
+    if (!parser.test(L"if test; end; end"))
     {
         err(L"Unbalanced end undetected");
     }
 
     say(L"Testing detection of invalid use of builtin commands");
-    if (!parser.test(L"case foo", 0, 0, 0))
+    if (!parser.test(L"case foo"))
     {
         err(L"'case' command outside of block context undetected");
     }
-    if (!parser.test(L"switch ggg; if true; case foo;end;end", 0, 0, 0))
+    if (!parser.test(L"switch ggg; if true; case foo;end;end"))
     {
         err(L"'case' command outside of switch block context undetected");
     }
-    if (!parser.test(L"else", 0, 0, 0))
+    if (!parser.test(L"else"))
     {
         err(L"'else' command outside of conditional block context undetected");
     }
-    if (!parser.test(L"else if", 0, 0, 0))
+    if (!parser.test(L"else if"))
     {
         err(L"'else if' command outside of conditional block context undetected");
     }
-    if (!parser.test(L"if false; else if; end", 0, 0, 0))
+    if (!parser.test(L"if false; else if; end"))
     {
         err(L"'else if' missing command undetected");
     }
 
-    if (!parser.test(L"break", 0, 0, 0))
+    if (!parser.test(L"break"))
     {
         err(L"'break' command outside of loop block context undetected");
     }
-    if (!parser.test(L"exec ls|less", 0, 0, 0) || !parser.test(L"echo|return", 0, 0, 0))
+    if (!parser.test(L"exec ls|less") || !parser.test(L"echo|return"))
     {
         err(L"Invalid pipe command undetected");
     }
@@ -936,6 +936,10 @@ static void test_test()
 
     /* This crashed */
     assert(run_test_test(1, L"1 = 1 -a = 1"));
+
+    /* Make sure we can treat -S as a parameter instead of an operator. https://github.com/fish-shell/fish-shell/issues/601 */
+    assert(run_test_test(0, L"-S = -S"));
+    assert(run_test_test(1, L"! ! ! A"));
 }
 
 /** Testing colors */
@@ -953,6 +957,76 @@ static void test_colors()
     assert(rgb_color_t(L"magenta").is_named());
     assert(rgb_color_t(L"MaGeNTa").is_named());
     assert(rgb_color_t(L"mooganta").is_none());
+}
+
+static void test_complete(void)
+{
+    say(L"Testing complete");
+    const wchar_t *name_strs[] = {L"Foo1", L"Foo2", L"Foo3", L"Bar1", L"Bar2", L"Bar3"};
+    size_t count = sizeof name_strs / sizeof *name_strs;
+    const wcstring_list_t names(name_strs, name_strs + count);
+
+    complete_set_variable_names(&names);
+
+    std::vector<completion_t> completions;
+    complete(L"$F", completions, COMPLETION_REQUEST_DEFAULT);
+    assert(completions.size() == 3);
+    assert(completions.at(0).completion == L"oo1");
+    assert(completions.at(1).completion == L"oo2");
+    assert(completions.at(2).completion == L"oo3");
+
+    complete_set_variable_names(NULL);
+}
+
+static void test_1_completion(wcstring line, const wcstring &completion, complete_flags_t flags, bool append_only, wcstring expected, long source_line)
+{
+    // str is given with a caret, which we use to represent the cursor position
+    // find it
+    const size_t in_cursor_pos = line.find(L'^');
+    assert(in_cursor_pos != wcstring::npos);
+    line.erase(in_cursor_pos, 1);
+
+    const size_t out_cursor_pos = expected.find(L'^');
+    assert(out_cursor_pos != wcstring::npos);
+    expected.erase(out_cursor_pos, 1);
+
+    size_t cursor_pos = in_cursor_pos;
+    wcstring result = completion_apply_to_command_line(completion, flags, line, &cursor_pos, append_only);
+    if (result != expected)
+    {
+        fprintf(stderr, "line %ld: %ls + %ls -> [%ls], expected [%ls]\n", source_line, line.c_str(), completion.c_str(), result.c_str(), expected.c_str());
+    }
+    assert(result == expected);
+    assert(cursor_pos == out_cursor_pos);
+}
+
+static void test_completion_insertions()
+{
+#define TEST_1_COMPLETION(a, b, c, d, e) test_1_completion(a, b, c, d, e, __LINE__)
+    say(L"Testing completion insertions");
+    TEST_1_COMPLETION(L"foo^", L"bar", 0, false, L"foobar ^");
+    TEST_1_COMPLETION(L"foo^ baz", L"bar", 0, false, L"foobar ^ baz"); //we really do want to insert two spaces here - otherwise it's hidden by the cursor
+    TEST_1_COMPLETION(L"'foo^", L"bar", 0, false, L"'foobar' ^");
+    TEST_1_COMPLETION(L"'foo'^", L"bar", 0, false, L"'foobar' ^");
+    TEST_1_COMPLETION(L"'foo\\'^", L"bar", 0, false, L"'foo\\'bar' ^");
+    TEST_1_COMPLETION(L"foo\\'^", L"bar", 0, false, L"foo\\'bar ^");
+
+    // Test append only
+    TEST_1_COMPLETION(L"foo^", L"bar", 0, true, L"foobar ^");
+    TEST_1_COMPLETION(L"foo^ baz", L"bar", 0, true, L"foobar ^ baz");
+    TEST_1_COMPLETION(L"'foo^", L"bar", 0, true, L"'foobar' ^");
+    TEST_1_COMPLETION(L"'foo'^", L"bar", 0, true, L"'foo'bar ^");
+    TEST_1_COMPLETION(L"'foo\\'^", L"bar", 0, true, L"'foo\\'bar' ^");
+    TEST_1_COMPLETION(L"foo\\'^", L"bar", 0, true, L"foo\\'bar ^");
+
+    TEST_1_COMPLETION(L"foo^", L"bar", COMPLETE_NO_SPACE, false, L"foobar^");
+    TEST_1_COMPLETION(L"'foo^", L"bar", COMPLETE_NO_SPACE, false, L"'foobar^");
+    TEST_1_COMPLETION(L"'foo'^", L"bar", COMPLETE_NO_SPACE, false, L"'foobar'^");
+    TEST_1_COMPLETION(L"'foo\\'^", L"bar", COMPLETE_NO_SPACE, false, L"'foo\\'bar^");
+    TEST_1_COMPLETION(L"foo\\'^", L"bar", COMPLETE_NO_SPACE, false, L"foo\\'bar^");
+
+    TEST_1_COMPLETION(L"foo^", L"bar", COMPLETE_CASE_INSENSITIVE | COMPLETE_REPLACES_TOKEN, false, L"bar ^");
+    TEST_1_COMPLETION(L"'foo^", L"bar", COMPLETE_CASE_INSENSITIVE | COMPLETE_REPLACES_TOKEN, false, L"bar ^");
 }
 
 static void perform_one_autosuggestion_test(const wcstring &command, const wcstring &wd, const wcstring &expected, long line)
@@ -1084,7 +1158,7 @@ void perf_complete()
         str[0]=c;
         reader_set_buffer(str, 0);
 
-        complete(str, out, COMPLETE_DEFAULT, NULL);
+        complete(str, out, COMPLETION_REQUEST_DEFAULT, NULL);
 
         matches += out.size();
         out.clear();
@@ -1104,7 +1178,7 @@ void perf_complete()
 
         reader_set_buffer(str, 0);
 
-        complete(str, out, COMPLETE_DEFAULT, NULL);
+        complete(str, out, COMPLETION_REQUEST_DEFAULT, NULL);
 
         matches += out.size();
         out.clear();
@@ -1627,7 +1701,7 @@ int main(int argc, char **argv)
     setlocale(LC_ALL, "");
     srand(time(0));
     configure_thread_assertions_for_testing();
-
+    
     program_name=L"(ignore)";
 
     say(L"Testing low-level functionality");
@@ -1640,6 +1714,7 @@ int main(int argc, char **argv)
     builtin_init();
     reader_init();
     env_init();
+    
 
     test_format();
     test_escape();
@@ -1655,6 +1730,8 @@ int main(int argc, char **argv)
     test_word_motion();
     test_is_potential_path();
     test_colors();
+    test_complete();
+    test_completion_insertions();
     test_autosuggestion_combining();
     test_autosuggest_suggest_special();
     history_tests_t::test_history();

@@ -1,11 +1,12 @@
 # fish completion for git
+# Use 'command git' to avoid interactions for aliases from git to (e.g.) hub
 
 function __fish_git_branches
-  git branch --no-color -a ^/dev/null | grep -v ' -> ' | sed -e 's/^..//' -e 's/^remotes\///'
+  command git branch --no-color -a ^/dev/null | grep -v ' -> ' | sed -e 's/^..//' -e 's/^remotes\///'
 end
 
 function __fish_git_tags
-  git tag
+  command git tag
 end
 
 function __fish_git_heads
@@ -14,17 +15,17 @@ function __fish_git_heads
 end
 
 function __fish_git_remotes
-  git remote
+  command git remote
 end
 
 function __fish_git_ranges
-  set from (commandline -ot | perl -ne 'my @parts = split(/\.\./); print $parts[0]')
-  set to (commandline -ot | perl -ne 'my @parts = split(/\.\./); print $parts[1]')
-  if [ "$from" = "" ]
+  set -l from (commandline -ot | perl -ne 'if (index($_, "..") > 0) { my @parts = split(/\.\./); print $parts[0]; }')
+  if test -z "$from"
     __fish_git_branches
     return 0
   end
-
+  
+  set -l to (commandline -ot | perl -ne 'if (index($_, "..") > 0) { my @parts = split(/\.\./); print $parts[1]; }')
   for from_ref in (__fish_git_heads | grep -e "$from")
     for to_ref in (__fish_git_heads | grep -e "$to")
       printf "%s..%s\n" $from_ref $to_ref
@@ -44,6 +45,12 @@ function __fish_git_using_command
   set cmd (commandline -opc)
   if [ (count $cmd) -gt 1 ]
     if [ $argv[1] = $cmd[2] ]
+      return 0
+    end
+
+    # aliased command
+    set -l aliased (command git config --get "alias.$cmd[2]" | sed 's/ .*$//')
+    if [ $argv[1] = "$aliased" ]
       return 0
     end
   end
@@ -140,6 +147,13 @@ complete -c git -n '__fish_git_using_command diff' -a '(__fish_git_ranges)' -d '
 complete -c git -n '__fish_git_using_command diff' -l cached -d 'Show diff of changes in the index'
 # TODO options
 
+### difftool
+complete -c git -n '__fish_git_needs_command'    -a difftool -d 'Open diffs in a visual tool'
+complete -c git -n '__fish_git_using_command difftool' -a '(__fish_git_ranges)' -d 'Branch'
+complete -c git -n '__fish_git_using_command difftool' -l cached -d 'Visually show diff of changes in the index'
+# TODO options
+
+
 ### grep
 complete -c git -n '__fish_git_needs_command'    -a grep -d 'Print lines matching a pattern'
 # TODO options
@@ -215,7 +229,7 @@ complete -f -c git -n '__fish_git_needs_command' -a status -d 'Show the working 
 complete -f -c git -n '__fish_git_using_command status' -s s -l short -d 'Give the output in the short-format'
 complete -f -c git -n '__fish_git_using_command status' -s b -l branch -d 'Show the branch and tracking info even in short-format'
 complete -f -c git -n '__fish_git_using_command status'      -l porcelain -d 'Give the output in a stable, easy-to-parse format'
-complete -f -c git -n '__fish_git_using_command status' -s z -d 'Terminate entries with NUL character'
+complete -f -c git -n '__fish_git_using_command status' -s z -d 'Terminate entries with null character'
 complete -f -c git -n '__fish_git_using_command status' -s u -l untracked-files -x -a 'no normal all' -d 'The untracked files handling mode'
 complete -f -c git -n '__fish_git_using_command status' -l ignore-submodules -x -a 'none untracked dirty all' -d 'Ignore changes to submodules'
 # TODO options
@@ -241,10 +255,16 @@ complete -f -c git -n '__fish_git_using_command format-patch' -a '(__fish_git_br
 
 ## git submodule
 complete -f -c git -n '__fish_git_needs_command' -a submodule -d 'Initialize, update or inspect submodules'
-complete -f -c git -n '__fish_git_using_command submodule' -a 'add status init update summary foreach sync' -d 'Make a GPG-signed tag'
+complete -f -c git -n '__fish_git_using_command submodule' -a 'add' -d 'Add a submodule'
+complete -f -c git -n '__fish_git_using_command submodule' -a 'status' -d 'Show submodule status'
+complete -f -c git -n '__fish_git_using_command submodule' -a 'init' -d 'Initialize all submodules'
+complete -f -c git -n '__fish_git_using_command submodule' -a 'update' -d 'Update all submodules'
+complete -f -c git -n '__fish_git_using_command submodule' -a 'summary' -d 'Show commit summary'
+complete -f -c git -n '__fish_git_using_command submodule' -a 'foreach' -d 'Run command on each submodule'
+complete -f -c git -n '__fish_git_using_command submodule' -a 'sync' -d 'Sync submodules\' URL with .gitmodules'
 
 ## git whatchanged
 complete -f -c git -n '__fish_git_needs_command' -a whatchanged -d 'Show logs with difference each commit introduces'
 
 ## Aliases (custom user-defined commands)
-complete -c git -n '__fish_git_needs_command' -a '(git config --get-regexp alias | sed "s/^alias\.\([^ ]*\).*/\1/")' -d 'Alias (user-defined command)'
+complete -c git -n '__fish_git_needs_command' -a '(command git config --get-regexp alias | sed "s/^alias\.\([^ ]*\).*/\1/")' -d 'Alias (user-defined command)'

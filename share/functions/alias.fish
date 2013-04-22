@@ -35,11 +35,17 @@ function alias --description "Legacy function for creating shellscript functions
 			return 1
 	end
 
-	switch (type -t $name)
-		case file
-			set prefix command
-		case builtin
-			set prefix builtin
+
+	# Prevent the alias from immediately running into an infinite recursion if
+	# $body starts with the same command as $name.
+
+	switch $body
+		case $name $name\ \* $name\t\*
+			if contains $name (builtin --names)
+				set prefix builtin
+			else
+				set prefix command
+			end
 	end
 
 	eval "function $name; $prefix $body \$argv; end"

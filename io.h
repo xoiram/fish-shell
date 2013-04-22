@@ -2,8 +2,15 @@
 #define FISH_IO_H
 
 #include <vector>
-#include <tr1/memory>
-using std::tr1::shared_ptr;
+#if __cplusplus > 199711L
+ // C++11
+ #include <memory>
+ using std::shared_ptr;
+#else
+ // C++03
+ #include <tr1/memory>
+ using std::tr1::shared_ptr;
+#endif
 
 /**
    Describes what type of IO operation an io_data_t represents
@@ -32,7 +39,7 @@ public:
     /** Type of redirect */
     const io_mode_t io_mode;
     /** FD to redirect */
-    int fd;
+    const int fd;
 
     virtual void print() const = 0;
     virtual ~io_data_t() = 0;
@@ -53,9 +60,9 @@ class io_fd_t : public io_data_t
 {
 public:
     /** fd to redirect specified fd to */
-    int old_fd;
+    const int old_fd;
     /** Whether to close old_fd */
-    int close_old;
+    const bool close_old;
 
     virtual void print() const;
 
@@ -73,8 +80,8 @@ public:
     /** Filename, malloc'd. This needs to be used after fork, so don't use wcstring here. */
     const char * const filename_cstr;
     /** file creation flags to send to open */
-    int flags;
-    
+    const int flags;
+
     virtual void print() const;
 
     io_file_t(int f, const wcstring &fname, int fl = 0) :
@@ -95,22 +102,22 @@ class io_pipe_t : public io_data_t
 protected:
     io_pipe_t(io_mode_t m, int f, bool i):
         io_data_t(m, f),
-        pipe_fd(),
         is_input(i)
     {
+        pipe_fd[0] = pipe_fd[1] = -1;
     }
 
 public:
     int pipe_fd[2];
-    bool is_input;
+    const bool is_input;
 
     virtual void print() const;
 
     io_pipe_t(int f, bool i):
         io_data_t(IO_PIPE, f),
-        pipe_fd(),
         is_input(i)
     {
+        pipe_fd[0] = pipe_fd[1] = -1;
     }
 };
 
@@ -167,8 +174,10 @@ public:
        \param is_input set this parameter to zero if the buffer should be
        used to buffer the output of a command, or non-zero to buffer the
        input to a command.
+
+       \param fd when -1, determined from is_input.
     */
-    static io_buffer_t *create(bool is_input);
+    static io_buffer_t *create(bool is_input, int fd = -1);
 };
 
 class io_chain_t : public std::vector<shared_ptr<io_data_t> >
@@ -178,10 +187,10 @@ public:
     io_chain_t(const shared_ptr<io_data_t> &);
 
     void remove(const shared_ptr<const io_data_t> &element);
+    void push_back(const shared_ptr<io_data_t> &element);
 
     shared_ptr<const io_data_t> get_io_for_fd(int fd) const;
     shared_ptr<io_data_t> get_io_for_fd(int fd);
-
 };
 
 /**

@@ -15,10 +15,6 @@ Utilities for io redirection.
 #include <set>
 #include <algorithm>
 
-#ifdef HAVE_SYS_TERMIOS_H
-#include <sys/termios.h>
-#endif
-
 #ifdef HAVE_SYS_IOCTL_H
 #include <sys/ioctl.h>
 #endif
@@ -30,10 +26,6 @@ Utilities for io redirection.
 #include <ncurses.h>
 #else
 #include <curses.h>
-#endif
-
-#if HAVE_TERMIO_H
-#include <termio.h>
 #endif
 
 #if HAVE_TERM_H
@@ -131,10 +123,14 @@ void io_buffer_t::read()
 }
 
 
-io_buffer_t *io_buffer_t::create(bool is_input)
+io_buffer_t *io_buffer_t::create(bool is_input, int fd)
 {
     bool success = true;
-    io_buffer_t *buffer_redirect = new io_buffer_t(is_input ? 0 : 1, is_input);
+    if (fd == -1)
+    {
+        fd = is_input ? 0 : 1;
+    }
+    io_buffer_t *buffer_redirect = new io_buffer_t(fd, is_input);
 
     if (exec_pipe(buffer_redirect->pipe_fd) == -1)
     {
@@ -142,9 +138,7 @@ io_buffer_t *io_buffer_t::create(bool is_input)
         wperror(L"pipe");
         success = false;
     }
-    else if (fcntl(buffer_redirect->pipe_fd[0],
-                   F_SETFL,
-                   O_NONBLOCK))
+    else if (make_fd_nonblocking(buffer_redirect->pipe_fd[0]) != 0)
     {
         debug(1, PIPE_ERROR);
         wperror(L"fcntl");
@@ -156,6 +150,10 @@ io_buffer_t *io_buffer_t::create(bool is_input)
         delete buffer_redirect;
         buffer_redirect = NULL;
     }
+    else
+    {
+        //fprintf(stderr, "Created pipes {%d, %d} for %p\n", buffer_redirect->pipe_fd[0], buffer_redirect->pipe_fd[1], buffer_redirect);
+    }
 
     return buffer_redirect;
 }
@@ -163,16 +161,20 @@ io_buffer_t *io_buffer_t::create(bool is_input)
 io_buffer_t::~io_buffer_t()
 {
 
+    //fprintf(stderr, "Deallocating pipes {%d, %d} for %p\n", this->pipe_fd[0], this->pipe_fd[1], this);
     /**
        If this is an input buffer, then io_read_buffer will not have
        been called, and we need to close the output fd as well.
     */
-    if (is_input)
+    if (is_input && pipe_fd[1] >= 0)
     {
         exec_close(pipe_fd[1]);
     }
 
-    exec_close(pipe_fd[0]);
+    if (pipe_fd[0] >= 0)
+    {
+        exec_close(pipe_fd[0]);
+    }
 
     /*
       Dont free fd for writing. This should already be free'd before
@@ -193,6 +195,13 @@ void io_chain_t::remove(const shared_ptr<const io_data_t> &element)
     }
 }
 
+void io_chain_t::push_back(const shared_ptr<io_data_t> &element)
+{
+    // Ensure we never push back NULL
+    assert(element.get() != NULL);
+    std::vector<shared_ptr<io_data_t> >::push_back(element);
+}
+
 void io_remove(io_chain_t &list, const shared_ptr<const io_data_t> &element)
 {
     list.remove(element);
@@ -210,8 +219,15 @@ void io_print(const io_chain_t &chain)
     for (size_t i=0; i < chain.size(); i++)
     {
         const shared_ptr<const io_data_t> &io = chain.at(i);
-        fprintf(stderr, "\t%lu: fd:%d, ", (unsigned long)i, io->fd);
-        io->print();
+        if (io.get() == NULL)
+        {
+            fprintf(stderr, "\t(null)\n");
+        }
+        else
+        {
+            fprintf(stderr, "\t%lu: fd:%d, ", (unsigned long)i, io->fd);
+            io->print();
+        }
     }
 }
 

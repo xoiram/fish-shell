@@ -277,7 +277,7 @@ href='commands.html#function'>function</a> builtin.
 
 \subsubsection syntax-function-wrappers Defining wrapper functions
 
-One of the most common used for functions is to slightly alter the
+One of the most common uses for functions is to slightly alter the
 behavior of an already existing command. For example, one might want
 to redefine the \c ls command to display colors. The switch for
 turning on colors on GNU systems is \c '--color=auto'. A wrapper
@@ -578,9 +578,8 @@ this list is executed, and substituted by the output. If the output is
 more than one line long, each line will be expanded to a new
 parameter.
 
-A command substitution will not change the value of the <a
-href='#variables-status'>status</a> variable outside of the command
-substitution.
+The exit status of the last run command substitution is available in the <a
+href='#variables-status'>status</a> variable.
 
 Only part of the output can be used, see <a href='#expand-index-range'>index
 range expansion</a> for details.
@@ -970,6 +969,7 @@ certain environment variables.
 - A large number of variable starting with the prefixes \c fish_color and \c fish_pager_color. See <a href='#variables-color'>Variables for changing highlighting colors</a> for more information.
 - \c fish_greeting, which is the greeting message printed on startup.
 - \c LANG, \c LC_ALL, \c LC_COLLATE, \c LC_CTYPE, \c LC_MESSAGES, \c LC_MONETARY, \c LC_NUMERIC and \c LC_TIME set the language option for the shell and subprograms. See the section <a href='#variables-locale'>Locale variables</a> for more information.
+- \c fish_user_paths, which is an array of directories that are appended to PATH. This can be a universal variable.
 - \c PATH, which is an array of directories in which to search for commands
 - \c umask, which is the current file creation mask. The preferred way to change the umask variable is through the <a href="commands.html#umask">umask shellscript function</a>. An attempt to set umask to an invalid value will always fail.
 
@@ -1180,6 +1180,9 @@ execution, and each such token is matched against the token under the
 cursor when the search began.
 
 History searches can be aborted by pressing the escape key.
+
+Prefixing the commandline with a space will prevent the entire line
+from being stored in the history.
 
 The history is stored in the file '~/.config/fish/fish_history'. It is automatically
 read on startup and merged on program exit.

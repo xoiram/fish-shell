@@ -135,7 +135,7 @@ public:
     /** Returns whether the color is bold */
     bool is_bold() const
     {
-        return flags & flag_bold;
+        return !!(flags & flag_bold);
     }
 
     /** Set whether the color is bold */
@@ -169,6 +169,9 @@ public:
     {
         return !(*this == other);
     }
+
+    /** Returns the names of all named colors */
+    static wcstring_list_t named_color_names(void);
 };
 
 #endif

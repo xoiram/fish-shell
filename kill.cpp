@@ -57,7 +57,7 @@ static wchar_t *cut_buffer=0;
 */
 static int has_xsel()
 {
-    static int res=-1;
+    static signed char res=-1;
     if (res < 0)
     {
         res = !! path_get_path(L"xsel", NULL);
@@ -103,16 +103,16 @@ void kill_add(const wcstring &str)
         const env_var_t disp_wstr = env_get_string(L"DISPLAY");
         if (!disp_wstr.missing())
         {
-            escaped_str = escape(str.c_str(), 1);
-            cmd.assign(L"echo ");
+            escaped_str = escape(str.c_str(), ESCAPE_ALL);
+            cmd.assign(L"echo -n ");
             cmd.append(escaped_str);
-            cmd.append(L"|xsel -b");
+            cmd.append(L" | xsel -i -b");
         }
     }
 
     if (! cmd.empty())
     {
-        if (exec_subshell(cmd) == -1)
+        if (exec_subshell(cmd, false /* do not apply exit status */) == -1)
         {
             /*
                Do nothing on failiure
@@ -175,7 +175,7 @@ static void kill_check_x_buffer()
         wcstring cmd = L"xsel -t 500 -b";
         wcstring new_cut_buffer=L"";
         wcstring_list_t list;
-        if (exec_subshell(cmd, list) != -1)
+        if (exec_subshell(cmd, list, false /* do not apply exit status */) != -1)
         {
 
             for (i=0; i<list.size(); i++)

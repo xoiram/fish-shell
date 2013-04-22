@@ -108,20 +108,31 @@ class env_var_t : public wcstring
 private:
     bool is_missing;
 public:
-    static env_var_t missing_var(void);
+    static env_var_t missing_var(void)
+    {
+        env_var_t result(L"");
+        result.is_missing = true;
+        return result;
+
+    }
+
     env_var_t(const env_var_t &x) : wcstring(x), is_missing(x.is_missing) { }
     env_var_t(const wcstring & x) : wcstring(x), is_missing(false) { }
     env_var_t(const wchar_t *x) : wcstring(x), is_missing(false) { }
     env_var_t() : wcstring(L""), is_missing(false) { }
+
     bool missing(void) const
     {
         return is_missing;
     }
+
     bool missing_or_empty(void) const
     {
         return missing() || empty();
     }
+
     const wchar_t *c_str(void) const;
+
     env_var_t &operator=(const env_var_t &s)
     {
         is_missing = s.is_missing;
@@ -131,18 +142,38 @@ public:
 
     bool operator==(const env_var_t &s) const
     {
-        if (is_missing &&  s.is_missing)
-            return true;
-        else if (s.is_missing || s.is_missing)
-            return false;
-        else
-            return *static_cast<const wcstring *>(this) == *static_cast<const wcstring *>(&s);
+        return is_missing == s.is_missing && static_cast<const wcstring &>(*this) == static_cast<const wcstring &>(s);
     }
 
+    bool operator==(const wcstring &s) const
+    {
+        return ! is_missing && static_cast<const wcstring &>(*this) == s;
+    }
+
+    bool operator!=(const env_var_t &s) const
+    {
+        return !(*this == s);
+    }
+
+    bool operator!=(const wcstring &s) const
+    {
+        return !(*this == s);
+    }
+
+    bool operator==(const wchar_t *s) const
+    {
+        return ! is_missing && static_cast<const wcstring &>(*this) == s;
+    }
+
+    bool operator!=(const wchar_t *s) const
+    {
+        return !(*this == s);
+    }
+
+
 };
-/**
- Gets the variable with the specified name, or an empty string if it does not exist.
- */
+
+/** Gets the variable with the specified name, or env_var_t::missing_var if it does not exist. */
 env_var_t env_get_string(const wcstring &key);
 
 /**
@@ -175,8 +206,7 @@ void env_push(bool new_scope);
 void env_pop();
 
 /** Returns an array containing all exported variables in a format suitable for execv. */
-char **env_export_arr(bool recalc);
-void env_export_arr(bool recalc, null_terminated_array_t<char> &result);
+const char * const * env_export_arr(bool recalc);
 
 /**
   Returns all variable names.

@@ -106,7 +106,7 @@ static void parse_message(wchar_t *msg,
 /**
    The table of all universal variables
 */
-typedef std::map<wcstring, var_uni_entry_t*> env_var_table_t;
+typedef std::map<wcstring, var_uni_entry_t> env_var_table_t;
 env_var_table_t env_universal_var;
 
 /**
@@ -416,28 +416,17 @@ void env_universal_common_init(void (*cb)(fish_message_type_t type, const wchar_
     callback = cb;
 }
 
-
-void env_universal_common_destroy()
-{
-    env_var_table_t::iterator iter;
-
-    for (iter = env_universal_var.begin(); iter != env_universal_var.end(); ++iter)
-    {
-        var_uni_entry_t* value = iter->second;
-        delete value;
-    }
-}
-
 /**
    Read one byte of date form the specified connection
  */
 static int read_byte(connection_t *src)
 {
 
-    if (src->buffer_consumed >= src->buffer_used)
+    if (src->buffer_consumed >= src->read_buffer.size())
     {
+        char local[ENV_UNIVERSAL_BUFFER_SIZE];
 
-        ssize_t res = read(src->fd, src->buffer, ENV_UNIVERSAL_BUFFER_SIZE);
+        ssize_t res = read(src->fd, local, sizeof local);
 
 //    debug(4, L"Read chunk '%.*s'", res, src->buffer );
 
@@ -453,17 +442,19 @@ static int read_byte(connection_t *src)
             return ENV_UNIVERSAL_ERROR;
 
         }
-
-        if (res == 0)
+        else if (res == 0)
         {
             return ENV_UNIVERSAL_EOF;
         }
-
-        src->buffer_consumed = 0;
-        src->buffer_used = res;
+        else
+        {
+            src->read_buffer.clear();
+            src->read_buffer.insert(src->read_buffer.begin(), local, local + res);
+            src->buffer_consumed = 0;
+        }
     }
 
-    return src->buffer[src->buffer_consumed++];
+    return src->read_buffer.at(src->buffer_consumed++);
 
 }
 
@@ -496,7 +487,7 @@ void read_message(connection_t *src)
             {
                 src->killme = 1;
                 debug(3, L"Fd %d has reached eof, set killme flag", src->fd);
-                if (src->input.size() > 0)
+                if (! src->input.empty())
                 {
                     char c = 0;
                     src->input.push_back(c);
@@ -550,13 +541,7 @@ void read_message(connection_t *src)
 */
 void env_universal_common_remove(const wcstring &name)
 {
-    env_var_table_t::iterator result =  env_universal_var.find(name);
-    if (result != env_universal_var.end())
-    {
-        var_uni_entry_t* v = result->second;
-        env_universal_var.erase(result);
-        delete v;
-    }
+    env_universal_var.erase(name);
 }
 
 /**
@@ -576,18 +561,13 @@ static bool match(const wchar_t *msg, const wchar_t *cmd)
 
 void env_universal_common_set(const wchar_t *key, const wchar_t *val, bool exportv)
 {
-    var_uni_entry_t *entry;
-
     CHECK(key,);
     CHECK(val,);
 
-    entry = new var_uni_entry_t;
+    var_uni_entry_t &entry = env_universal_var[key];
+    entry.exportv=exportv;
+    entry.val = val;
 
-    entry->exportv=exportv;
-    entry->val = val;
-    env_universal_common_remove(key);
-
-    env_universal_var[key] = entry;
     if (callback)
     {
         callback(exportv?SET_EXPORT:SET, key, val);
@@ -618,21 +598,16 @@ static void parse_message(wchar_t *msg,
         tmp = wcschr(name, L':');
         if (tmp)
         {
-            wchar_t *key;
             wchar_t *val;
-
-            key = (wchar_t *)malloc(sizeof(wchar_t)*(tmp-name+1));
-            memcpy(key, name, sizeof(wchar_t)*(tmp-name));
-            key[tmp-name]=0;
+            const wcstring key(name, tmp - name);
 
             val = tmp+1;
             val = unescape(val, 0);
 
-            if (key && val)
-                env_universal_common_set(key, val, exportv);
+            if (val != NULL)
+                env_universal_common_set(key.c_str(), val, exportv);
 
             free(val);
-            free(key);
         }
         else
         {
@@ -669,7 +644,7 @@ static void parse_message(wchar_t *msg,
     {
         message_t *msg = create_message(BARRIER_REPLY, 0, 0);
         msg->count = 1;
-        src->unsent->push(msg);
+        src->unsent.push(msg);
         try_send_all(src);
     }
     else if (match(msg, BARRIER_REPLY_STR))
@@ -739,12 +714,12 @@ void try_send_all(connection_t *c)
     /*  debug( 3,
            L"Send all updates to connection on fd %d",
            c->fd );*/
-    while (!c->unsent->empty())
+    while (!c->unsent.empty())
     {
-        switch (try_send(c->unsent->front(), c->fd))
+        switch (try_send(c->unsent.front(), c->fd))
         {
             case 1:
-                c->unsent->pop();
+                c->unsent.pop();
                 break;
 
             case 0:
@@ -824,10 +799,7 @@ message_t *create_message(fish_message_type_t type,
                           const wchar_t *key_in,
                           const wchar_t *val_in)
 {
-    message_t *msg = new message_t;
-    msg->count = 0;
-
-    char *key=0;
+    char *key = NULL;
 
     //  debug( 4, L"Crete message of type %d", type );
 
@@ -836,7 +808,7 @@ message_t *create_message(fish_message_type_t type,
         if (wcsvarname(key_in))
         {
             debug(0, L"Illegal variable name: '%ls'", key_in);
-            return 0;
+            return NULL;
         }
 
         key = wcs2utf(key_in);
@@ -845,10 +817,12 @@ message_t *create_message(fish_message_type_t type,
             debug(0,
                   L"Could not convert %ls to narrow character string",
                   key_in);
-            return 0;
+            return NULL;
         }
     }
 
+    message_t *msg = new message_t;
+    msg->count = 0;
 
     switch (type)
     {
@@ -864,7 +838,6 @@ message_t *create_message(fish_message_type_t type,
             char *val = wcs2utf(esc.c_str());
             set_body(msg, (type==SET?SET_MBS:SET_EXPORT_MBS), " ", key, ":", val, "\n", NULL);
             free(val);
-
             break;
         }
 
@@ -909,31 +882,27 @@ void env_universal_common_get_names(wcstring_list_t &lst,
     env_var_table_t::const_iterator iter;
     for (iter = env_universal_var.begin(); iter != env_universal_var.end(); ++iter)
     {
-        const wcstring& key = iter->first;
-        const var_uni_entry_t *e = iter->second;
-        if ((e->exportv && show_exported) ||
-                (!e->exportv && show_unexported))
+        const wcstring &key = iter->first;
+        const var_uni_entry_t &e = iter->second;
+        if ((e.exportv && show_exported) || (! e.exportv && show_unexported))
         {
             lst.push_back(key);
         }
-
     }
 
 }
 
 
-wchar_t *env_universal_common_get(const wcstring &name)
+const wchar_t *env_universal_common_get(const wcstring &name)
 {
     env_var_table_t::const_iterator result = env_universal_var.find(name);
-
     if (result != env_universal_var.end())
     {
-        const var_uni_entry_t *e = result->second;
-        if (e)
-            return const_cast<wchar_t*>(e->val.c_str());
+        const var_uni_entry_t &e = result->second;
+        return const_cast<wchar_t*>(e.val.c_str());
     }
 
-    return 0;
+    return NULL;
 }
 
 bool env_universal_common_get_export(const wcstring &name)
@@ -941,9 +910,8 @@ bool env_universal_common_get_export(const wcstring &name)
     env_var_table_t::const_iterator result = env_universal_var.find(name);
     if (result != env_universal_var.end())
     {
-        const var_uni_entry_t *e = result->second;
-        if (e != NULL)
-            return e->exportv;
+        const var_uni_entry_t &e = result->second;
+        return e.exportv;
     }
     return false;
 }
@@ -951,33 +919,28 @@ bool env_universal_common_get_export(const wcstring &name)
 void enqueue_all(connection_t *c)
 {
     env_var_table_t::const_iterator iter;
-
     for (iter = env_universal_var.begin(); iter != env_universal_var.end(); ++iter)
     {
         const wcstring &key = iter->first;
-        const var_uni_entry_t *val = iter->second;
+        const var_uni_entry_t &entry = iter->second;
 
-        message_t *msg = create_message(val->exportv?SET_EXPORT:SET, key.c_str(), val->val.c_str());
+        message_t *msg = create_message(entry.exportv ? SET_EXPORT : SET, key.c_str(), entry.val.c_str());
         msg->count=1;
-        c->unsent->push(msg);
+        c->unsent.push(msg);
     }
 
     try_send_all(c);
 }
 
-
-void connection_init(connection_t *c, int fd)
+connection_t::connection_t(int input_fd) :
+    fd(input_fd),
+    killme(false),
+    buffer_consumed(0)
 {
-    memset(c, 0, sizeof(connection_t));
-    c->fd = fd;
-    c->unsent = new std::queue<message_t *>;
-    c->buffer_consumed = c->buffer_used = 0;
 }
 
 void connection_destroy(connection_t *c)
 {
-    if (c->unsent) delete c->unsent;
-
     /*
       A connection need not always be open - we only try to close it
       if it is open.

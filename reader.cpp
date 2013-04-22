@@ -30,10 +30,6 @@ commence.
 #include <sys/types.h>
 #include <sys/stat.h>
 
-#ifdef HAVE_SYS_TERMIOS_H
-#include <sys/termios.h>
-#endif
-
 #ifdef HAVE_SYS_IOCTL_H
 #include <sys/ioctl.h>
 #endif
@@ -45,15 +41,12 @@ commence.
 #include <unistd.h>
 #include <wctype.h>
 #include <stack>
+#include <pthread.h>
 
 #if HAVE_NCURSES_H
 #include <ncurses.h>
 #else
 #include <curses.h>
-#endif
-
-#if HAVE_TERMIO_H
-#include <termio.h>
 #endif
 
 #if HAVE_TERM_H
@@ -180,8 +173,11 @@ commence.
  */
 #define SEARCH_FORWARD 1
 
-/* Any time the contents of a buffer changes, we update the generation count. This allows for our background highlighting thread to notice it and skip doing work that it would otherwise have to do. */
-static unsigned int s_generation_count;
+/* Any time the contents of a buffer changes, we update the generation count. This allows for our background highlighting thread to notice it and skip doing work that it would otherwise have to do. This variable should really be of some kind of interlocked or atomic type that guarantees we're not reading stale cache values. With C++11 we should use atomics, but until then volatile should work as well, at least on x86.*/
+static volatile unsigned int s_generation_count;
+
+/* This pthreads generation count is set when an autosuggestion background thread starts up, so it can easily check if the work it is doing is no longer useful. */
+static pthread_key_t generation_count_key;
 
 /* A color is an int */
 typedef int color_t;
@@ -323,6 +319,9 @@ public:
     /** Whether a screen reset is needed after a repaint. */
     bool screen_reset_needed;
 
+    /** Whether the reader should exit on ^C. */
+    bool exit_on_interrupt;
+
     /** Constructor */
     reader_data_t() :
         allow_autosuggestion(0),
@@ -339,7 +338,8 @@ public:
         next(0),
         search_mode(0),
         repaint_needed(0),
-        screen_reset_needed(0)
+        screen_reset_needed(0),
+        exit_on_interrupt(0)
     {
     }
 };
@@ -373,12 +373,15 @@ static pid_t original_pid;
 /**
    This variable is set to true by the signal handler when ^C is pressed
 */
-static int interrupted=0;
+static volatile int interrupted=0;
 
 
 /*
   Prototypes for a bunch of functions defined later on.
 */
+
+static bool is_backslashed(const wcstring &str, size_t pos);
+static wchar_t unescaped_quote(const wcstring &str, size_t pos);
 
 /**
    Stores the previous termios mode so we can reset the modes when
@@ -505,7 +508,7 @@ wcstring combine_command_and_autosuggestion(const wcstring &cmdline, const wcstr
 static void reader_repaint()
 {
     // Update the indentation
-    parser_t::principal_parser().test(data->command_line.c_str(), &data->indents[0], 0, 0);
+    parser_t::principal_parser().test(data->command_line.c_str(), &data->indents[0]);
 
     // Combine the command and autosuggestion into one string
     wcstring full_line = combine_command_and_autosuggestion(data->command_line, data->autosuggestion);
@@ -532,9 +535,16 @@ static void reader_repaint()
     data->repaint_needed = false;
 }
 
-/**
-   Internal helper function for handling killing parts of text.
-*/
+static void reader_repaint_without_autosuggestion()
+{
+    // Swap in an empty autosuggestion, repaint, then swap it out
+    wcstring saved_autosuggestion;
+    data->autosuggestion.swap(saved_autosuggestion);
+    reader_repaint();
+    data->autosuggestion.swap(saved_autosuggestion);
+}
+
+/** Internal helper function for handling killing parts of text. */
 static void reader_kill(size_t begin_idx, size_t length, int mode, int newv)
 {
     const wchar_t *begin = data->command_line.c_str() + begin_idx;
@@ -545,7 +555,6 @@ static void reader_kill(size_t begin_idx, size_t length, int mode, int newv)
     }
     else
     {
-
         wcstring old = data->kill_item;
         if (mode == KILL_APPEND)
         {
@@ -575,6 +584,7 @@ static void reader_kill(size_t begin_idx, size_t length, int mode, int newv)
     reader_repaint();
 
 }
+
 
 /* This is called from a signal handler! */
 void reader_handle_int(int sig)
@@ -626,18 +636,47 @@ void reader_data_t::command_line_changed()
 }
 
 
-/** Remove any duplicate completions in the list. This relies on the list first being sorted. */
-static void remove_duplicates(std::vector<completion_t> &l)
+/** Sorts and remove any duplicate completions in the list. */
+static void sort_and_make_unique(std::vector<completion_t> &l)
 {
+    sort(l.begin(), l.end());
     l.erase(std::unique(l.begin(), l.end()), l.end());
+}
+
+
+void reader_reset_interrupted()
+{
+    interrupted = 0;
 }
 
 int reader_interrupted()
 {
-    int res=interrupted;
+    int res = interrupted;
     if (res)
+    {
         interrupted=0;
+    }
     return res;
+}
+
+int reader_reading_interrupted()
+{
+    int res = reader_interrupted();
+    if (res && data && data->exit_on_interrupt)
+    {
+        reader_exit(1, 0);
+        parser_t::skip_all_blocks();
+        // We handled the interrupt ourselves, our caller doesn't need to
+        // handle it.
+        return 0;
+    }
+    return res;
+}
+
+bool reader_thread_job_is_stale()
+{
+    ASSERT_IS_BACKGROUND_THREAD();
+    return (void*)(uintptr_t) s_generation_count != pthread_getspecific(generation_count_key);
 }
 
 void reader_write_title()
@@ -692,13 +731,12 @@ void reader_write_title()
     wcstring_list_t lst;
 
     proc_push_interactive(0);
-    if (exec_subshell(title, lst) != -1)
+    if (exec_subshell(title, lst, false /* do not apply exit status */) != -1)
     {
-        size_t i;
-        if (lst.size() > 0)
+        if (! lst.empty())
         {
             writestr(L"\x1b]0;");
-            for (i=0; i<lst.size(); i++)
+            for (size_t i=0; i<lst.size(); i++)
             {
                 writestr(lst.at(i).c_str());
             }
@@ -718,34 +756,35 @@ static void exec_prompt()
     data->left_prompt_buff.clear();
     data->right_prompt_buff.clear();
 
+    /* Do not allow the exit status of the prompts to leak through */
+    const bool apply_exit_status = false;
+
     /* If we have any prompts, they must be run non-interactively */
     if (data->left_prompt.size() || data->right_prompt.size())
     {
         proc_push_interactive(0);
 
-        if (data->left_prompt.size())
+        if (! data->left_prompt.empty())
         {
             wcstring_list_t prompt_list;
-            if (exec_subshell(data->left_prompt, prompt_list) == 0)
+            // ignore return status
+            exec_subshell(data->left_prompt, prompt_list, apply_exit_status);
+            for (size_t i = 0; i < prompt_list.size(); i++)
             {
-                for (size_t i = 0; i < prompt_list.size(); i++)
-                {
-                    if (i > 0) data->left_prompt_buff += L'\n';
-                    data->left_prompt_buff += prompt_list.at(i);
-                }
+                if (i > 0) data->left_prompt_buff += L'\n';
+                data->left_prompt_buff += prompt_list.at(i);
             }
         }
 
-        if (data->right_prompt.size())
+        if (! data->right_prompt.empty())
         {
             wcstring_list_t prompt_list;
-            if (exec_subshell(data->right_prompt, prompt_list) == 0)
+            // status is ignored
+            exec_subshell(data->right_prompt, prompt_list, apply_exit_status);
+            for (size_t i = 0; i < prompt_list.size(); i++)
             {
-                for (size_t i = 0; i < prompt_list.size(); i++)
-                {
-                    // Right prompt does not support multiple lines, so just concatenate all of them
-                    data->right_prompt_buff += prompt_list.at(i);
-                }
+                // Right prompt does not support multiple lines, so just concatenate all of them
+                data->right_prompt_buff += prompt_list.at(i);
             }
         }
 
@@ -758,6 +797,7 @@ static void exec_prompt()
 
 void reader_init()
 {
+    VOMIT_ON_FAILURE(pthread_key_create(&generation_count_key, NULL));
 
     tcgetattr(0,&shell_modes);        /* get the current terminal modes */
     memcpy(&saved_modes,
@@ -775,15 +815,13 @@ void reader_init()
 #ifdef VDSUSP
     shell_modes.c_cc[VDSUSP] = _POSIX_VDISABLE;
 #endif
-
-    /* Repaint if necessary before each byte is read. This lets us react immediately to universal variable color changes. */
-    input_common_set_poll_callback(reader_repaint_if_needed);
 }
 
 
 void reader_destroy()
 {
     tcsetattr(0, TCSANOW, &saved_modes);
+    pthread_key_delete(generation_count_key);
 }
 
 
@@ -827,12 +865,21 @@ void reader_repaint_if_needed()
     }
 }
 
+static void reader_repaint_if_needed_one_arg(void * unused)
+{
+    reader_repaint_if_needed();
+}
+
 void reader_react_to_color_change()
 {
-    if (data)
+    if (! data)
+        return;
+    
+    if (! data->repaint_needed || ! data->screen_reset_needed)
     {
         data->repaint_needed = true;
         data->screen_reset_needed = true;
+        input_common_add_callback(reader_repaint_if_needed_one_arg, NULL);
     }
 }
 
@@ -931,21 +978,21 @@ static size_t comp_ilen(const wchar_t *a, const wchar_t *b)
    \param flags A union of all flags describing the completion to insert. See the completion_t struct for more information on possible values.
    \param command_line The command line into which we will insert
    \param inout_cursor_pos On input, the location of the cursor within the command line. On output, the new desired position.
+   \param append_only Whether we can only append to the command line, or also modify previous characters. This is used to determine whether we go inside a trailing quote.
    \return The completed string
 */
-static wcstring completion_apply_to_command_line(const wcstring &val_str, int flags, const wcstring &command_line, size_t *inout_cursor_pos)
+wcstring completion_apply_to_command_line(const wcstring &val_str, complete_flags_t flags, const wcstring &command_line, size_t *inout_cursor_pos, bool append_only)
 {
     const wchar_t *val = val_str.c_str();
     bool add_space = !(flags & COMPLETE_NO_SPACE);
-    bool do_replace = !!(flags & COMPLETE_NO_CASE);
+    bool do_replace = !!(flags & COMPLETE_REPLACES_TOKEN);
     bool do_escape = !(flags & COMPLETE_DONT_ESCAPE);
-    const size_t cursor_pos = *inout_cursor_pos;
 
-    //	debug( 0, L"Insert completion %ls with flags %d", val, flags);
+    const size_t cursor_pos = *inout_cursor_pos;
+    bool back_into_trailing_quote = false;
 
     if (do_replace)
     {
-
         size_t move_cursor;
         const wchar_t *begin, *end;
         wchar_t *escaped;
@@ -958,7 +1005,9 @@ static wcstring completion_apply_to_command_line(const wcstring &val_str, int fl
 
         if (do_escape)
         {
-            escaped = escape(val, ESCAPE_ALL | ESCAPE_NO_QUOTED);
+            /* Respect COMPLETE_DONT_ESCAPE_TILDES */
+            bool no_tilde = !! (flags & COMPLETE_DONT_ESCAPE_TILDES);
+            escaped = escape(val, ESCAPE_ALL | ESCAPE_NO_QUOTED | (no_tilde ? ESCAPE_NO_TILDE : 0));
             sb.append(escaped);
             move_cursor = wcslen(escaped);
             free(escaped);
@@ -987,7 +1036,21 @@ static wcstring completion_apply_to_command_line(const wcstring &val_str, int fl
         wcstring replaced;
         if (do_escape)
         {
+            /* Note that we ignore COMPLETE_DONT_ESCAPE_TILDES here. We get away with this because unexpand_tildes only operates on completions that have COMPLETE_REPLACES_TOKEN set, but we ought to respect them */
             parse_util_get_parameter_info(command_line, cursor_pos, &quote, NULL, NULL);
+
+            /* If the token is reported as unquoted, but ends with a (unescaped) quote, and we can modify the command line, then delete the trailing quote so that we can insert within the quotes instead of after them. See https://github.com/fish-shell/fish-shell/issues/552 */
+            if (quote == L'\0' && ! append_only && cursor_pos > 0)
+            {
+                /* The entire token is reported as unquoted...see if the last character is an unescaped quote */
+                wchar_t trailing_quote = unescaped_quote(command_line, cursor_pos - 1);
+                if (trailing_quote != L'\0')
+                {
+                    quote = trailing_quote;
+                    back_into_trailing_quote = true;
+                }
+            }
+
             replaced = parse_util_escape_string_with_quote(val_str, quote);
         }
         else
@@ -995,12 +1058,21 @@ static wcstring completion_apply_to_command_line(const wcstring &val_str, int fl
             replaced = val;
         }
 
+        size_t insertion_point = cursor_pos;
+        if (back_into_trailing_quote)
+        {
+            /* Move the character back one so we enter the terminal quote */
+            assert(insertion_point > 0);
+            insertion_point--;
+        }
+
+        /* Perform the insertion and compute the new location */
         wcstring result = command_line;
-        result.insert(cursor_pos, replaced);
-        size_t new_cursor_pos = cursor_pos + replaced.size();
+        result.insert(insertion_point, replaced);
+        size_t new_cursor_pos = insertion_point + replaced.size() + (back_into_trailing_quote ? 1 : 0);
         if (add_space)
         {
-            if (quote && (command_line.c_str()[cursor_pos] != quote))
+            if (quote != L'\0' && unescaped_quote(command_line, insertion_point) != quote)
             {
                 /* This is a quoted parameter, first print a quote */
                 result.insert(new_cursor_pos++, wcstring(&quote, 1));
@@ -1021,14 +1093,31 @@ static wcstring completion_apply_to_command_line(const wcstring &val_str, int fl
    \param flags A union of all flags describing the completion to insert. See the completion_t struct for more information on possible values.
 
 */
-static void completion_insert(const wchar_t *val, int flags)
+static void completion_insert(const wchar_t *val, complete_flags_t flags)
 {
     size_t cursor = data->buff_pos;
-    wcstring new_command_line = completion_apply_to_command_line(val, flags, data->command_line, &cursor);
+    wcstring new_command_line = completion_apply_to_command_line(val, flags, data->command_line, &cursor, false /* not append only */);
     reader_set_buffer(new_command_line, cursor);
 
     /* Since we just inserted a completion, don't immediately do a new autosuggestion */
     data->suppress_autosuggestion = true;
+}
+
+/* Return an escaped path to fish_pager */
+static wcstring escaped_fish_pager_path(void)
+{
+    wcstring result;
+    const env_var_t bin_dir = env_get_string(L"__fish_bin_dir");
+    if (bin_dir.missing_or_empty())
+    {
+        /* This isn't good, hope our normal command stuff can find it */
+        result = L"fish_pager";
+    }
+    else
+    {
+        result = escape_string(bin_dir + L"/fish_pager", ESCAPE_ALL);
+    }
+    return result;
 }
 
 /**
@@ -1040,15 +1129,20 @@ static void completion_insert(const wchar_t *val, int flags)
    \param is_quoted should be set if the argument is quoted. This will change the display style.
    \param comp the list of completions to display
 */
-
 static void run_pager(const wcstring &prefix, int is_quoted, const std::vector<completion_t> &comp)
 {
     wcstring msg;
     wcstring prefix_esc;
     char *foo;
 
+    shared_ptr<io_buffer_t> in(io_buffer_t::create(true, 3));
+    shared_ptr<io_buffer_t> out(io_buffer_t::create(false, 4));
+
+    // The above may fail e.g. if we have too many open fds
+    if (in.get() == NULL || out.get() == NULL)
+        return;
+
     wchar_t *escaped_separator;
-    int has_case_sensitive=0;
 
     if (prefix.empty())
     {
@@ -1059,20 +1153,25 @@ static void run_pager(const wcstring &prefix, int is_quoted, const std::vector<c
         prefix_esc = escape_string(prefix, 1);
     }
 
-    wcstring cmd = format_string(L"fish_pager -c 3 -r 4 %ls -p %ls",
-                                 // L"valgrind --track-fds=yes --log-file=pager.txt --leak-check=full ./fish_pager %d %ls",
-                                 is_quoted?L"-q":L"",
-                                 prefix_esc.c_str());
 
-    shared_ptr<io_buffer_t> in(io_buffer_t::create(true));
-    in->fd = 3;
+    const wcstring pager_path = escaped_fish_pager_path();
+    const wcstring cmd = format_string(L"%ls -c 3 -r 4 %ls -p %ls",
+                                       // L"valgrind --track-fds=yes --log-file=pager.txt --leak-check=full ./%ls %d %ls",
+                                       pager_path.c_str(),
+                                       is_quoted?L"-q":L"",
+                                       prefix_esc.c_str());
 
     escaped_separator = escape(COMPLETE_SEP_STR, 1);
 
+    bool has_case_sensitive = false;
     for (size_t i=0; i< comp.size(); i++)
     {
         const completion_t &el = comp.at(i);
-        has_case_sensitive |= !(el.flags & COMPLETE_NO_CASE);
+        if (!(el.flags & COMPLETE_CASE_INSENSITIVE))
+        {
+            has_case_sensitive = true;
+            break;
+        }
     }
 
     for (size_t i=0; i< comp.size(); i++)
@@ -1084,13 +1183,13 @@ static void run_pager(const wcstring &prefix, int is_quoted, const std::vector<c
         wcstring completion_text;
         wcstring description_text;
 
-        if (has_case_sensitive && (el.flags & COMPLETE_NO_CASE))
+        if (has_case_sensitive && (el.flags & COMPLETE_CASE_INSENSITIVE))
         {
             continue;
         }
 
         // Note that an empty completion is perfectly sensible here, e.g. tab-completing 'foo' with a file called 'foo' and another called 'foobar'
-        if (el.flags & COMPLETE_NO_CASE)
+        if (el.flags & COMPLETE_REPLACES_TOKEN)
         {
             if (base_len == -1)
             {
@@ -1132,10 +1231,6 @@ static void run_pager(const wcstring &prefix, int is_quoted, const std::vector<c
     free(foo);
 
     term_donate();
-
-    shared_ptr<io_buffer_t> out(io_buffer_t::create(false));
-    out->fd = 4;
-
     parser_t &parser = parser_t::principal_parser();
     io_chain_t io_chain;
     io_chain.push_back(out);
@@ -1198,13 +1293,15 @@ struct autosuggestion_context_t
             return 0;
         }
 
+        VOMIT_ON_FAILURE(pthread_setspecific(generation_count_key, (void*)(uintptr_t) generation_count));
+
         /* Let's make sure we aren't using the empty string */
         if (search_string.empty())
         {
             return 0;
         }
 
-        while (searcher.go_backwards())
+        while (! reader_thread_job_is_stale() && searcher.go_backwards())
         {
             history_item_t item = searcher.current_item();
 
@@ -1218,8 +1315,11 @@ struct autosuggestion_context_t
                 this->autosuggestion = searcher.current_string();
                 return 1;
             }
-
         }
+
+        /* Maybe cancel here */
+        if (reader_thread_job_is_stale())
+            return 0;
 
         /* Try handling a special command like cd */
         wcstring special_suggestion;
@@ -1228,6 +1328,10 @@ struct autosuggestion_context_t
             this->autosuggestion = special_suggestion;
             return 1;
         }
+        
+        /* Maybe cancel here */
+        if (reader_thread_job_is_stale())
+            return 0;
 
         // Here we do something a little funny
         // If the line ends with a space, and the cursor is not at the end,
@@ -1244,12 +1348,12 @@ struct autosuggestion_context_t
 
         /* Try normal completions */
         std::vector<completion_t> completions;
-        complete(search_string, completions, COMPLETE_AUTOSUGGEST, &this->commands_to_load);
+        complete(search_string, completions, COMPLETION_REQUEST_AUTOSUGGESTION, &this->commands_to_load);
         if (! completions.empty())
         {
             const completion_t &comp = completions.at(0);
             size_t cursor = this->cursor_pos;
-            this->autosuggestion = completion_apply_to_command_line(comp.completion.c_str(), comp.flags, this->search_string, &cursor);
+            this->autosuggestion = completion_apply_to_command_line(comp.completion.c_str(), comp.flags, this->search_string, &cursor, true /* append only */);
             return 1;
         }
 
@@ -1469,8 +1573,11 @@ static const completion_t *cycle_competions(const std::vector<completion_t> &com
    space.
    - If the list contains multiple elements with a common prefix, write
    the prefix.
-   - If the list contains multiple elements without.
-   a common prefix, call run_pager to display a list of completions. Depending on terminal size and the length of the list, run_pager may either show less than a screenfull and exit or use an interactive pager to allow the user to scroll through the completions.
+   - If the list contains multiple elements without a common prefix, call
+   run_pager to display a list of completions. Depending on terminal size and
+   the length of the list, run_pager may either show less than a screenfull and
+   exit or use an interactive pager to allow the user to scroll through the
+   completions.
 
    \param comp the list of completion strings
 
@@ -1654,6 +1761,10 @@ static bool handle_completions(const std::vector<completion_t> &comp)
             wchar_t quote;
             parse_util_get_parameter_info(data->command_line, data->buff_pos, &quote, NULL, NULL);
             is_quoted = (quote != L'\0');
+
+            /* Clear the autosuggestion from the old commandline before abandoning it (see #561) */
+            if (! data->autosuggestion.empty())
+                reader_repaint_without_autosuggestion();
 
             write_loop(1, "\n", 1);
 
@@ -2227,12 +2338,12 @@ void set_env_cmd_duration(struct timeval *after, struct timeval *before)
     }
 }
 
-void reader_run_command(parser_t &parser, const wchar_t *cmd)
+void reader_run_command(parser_t &parser, const wcstring &cmd)
 {
 
     struct timeval time_before, time_after;
 
-    wcstring ft = tok_first(cmd);
+    wcstring ft = tok_first(cmd.c_str());
 
     if (! ft.empty())
         env_set(L"_", ft.c_str(), ENV_GLOBAL);
@@ -2263,7 +2374,7 @@ void reader_run_command(parser_t &parser, const wchar_t *cmd)
 
 int reader_shell_test(const wchar_t *b)
 {
-    int res = parser_t::principal_parser().test(b, 0, 0, 0);
+    int res = parser_t::principal_parser().test(b);
 
     if (res & PARSER_TEST_ERROR)
     {
@@ -2283,7 +2394,7 @@ int reader_shell_test(const wchar_t *b)
                 0);
 
 
-        parser_t::principal_parser().test(b, 0, &sb, L"fish");
+        parser_t::principal_parser().test(b, NULL, &sb, L"fish");
         fwprintf(stderr, L"%ls", sb.c_str());
     }
     return res;
@@ -2378,6 +2489,11 @@ void reader_set_highlight_function(highlight_function_t func)
 void reader_set_test_function(int (*f)(const wchar_t *))
 {
     data->test_func = f;
+}
+
+void reader_set_exit_on_interrupt(bool i)
+{
+    data->exit_on_interrupt = i;
 }
 
 void reader_import_history_if_necessary(void)
@@ -2603,7 +2719,7 @@ static void handle_end_loop()
    Read interactively. Read input from stdin while providing editing
    facilities.
 */
-static int read_i()
+static int read_i(void)
 {
     reader_push(L"fish");
     reader_set_complete_function(&complete);
@@ -2618,8 +2734,6 @@ static int read_i()
 
     while ((!data->end_loop) && (!sanity_check()))
     {
-        const wchar_t *tmp;
-
         event_fire_generic(L"fish_prompt");
         if (function_exists(LEFT_PROMPT_FUNCTION_NAME))
             reader_set_left_prompt(LEFT_PROMPT_FUNCTION_NAME);
@@ -2638,9 +2752,7 @@ static int read_i()
           during evaluation.
         */
 
-
-        tmp = reader_readline();
-
+        const wchar_t *tmp = reader_readline();
 
         if (data->end_loop)
         {
@@ -2648,13 +2760,11 @@ static int read_i()
         }
         else if (tmp)
         {
-            tmp = wcsdup(tmp);
-
+            wcstring command = tmp;
             data->buff_pos=0;
             data->command_line.clear();
             data->command_line_changed();
-            reader_run_command(parser, tmp);
-            free((void *)tmp);
+            reader_run_command(parser, command);
             if (data->end_loop)
             {
                 handle_end_loop();
@@ -2696,25 +2806,42 @@ static int wchar_private(wchar_t c)
 
 /**
    Test if the specified character in the specified string is
-   backslashed.
+   backslashed. pos may be at the end of the string, which indicates
+   if there is a trailing backslash.
 */
-static bool is_backslashed(const wchar_t *str, size_t pos)
+static bool is_backslashed(const wcstring &str, size_t pos)
 {
-    size_t count = 0;
-    size_t idx = pos;
+    /* note pos == str.size() is OK */
+    if (pos > str.size())
+        return false;
+
+    size_t count = 0, idx = pos;
     while (idx--)
     {
-        if (str[idx] != L'\\')
+        if (str.at(idx) != L'\\')
             break;
-
         count++;
     }
 
     return (count % 2) == 1;
 }
 
+static wchar_t unescaped_quote(const wcstring &str, size_t pos)
+{
+    wchar_t result = L'\0';
+    if (pos < str.size())
+    {
+        wchar_t c = str.at(pos);
+        if ((c == L'\'' || c == L'"') && ! is_backslashed(str, pos))
+        {
+            result = c;
+        }
+    }
+    return result;
+}
 
-const wchar_t *reader_readline()
+
+const wchar_t *reader_readline(void)
 {
     wint_t c;
     int last_char=0;
@@ -2903,7 +3030,7 @@ const wchar_t *reader_readline()
                     if (next_comp != NULL)
                     {
                         size_t cursor_pos = cycle_cursor_pos;
-                        const wcstring new_cmd_line = completion_apply_to_command_line(next_comp->completion, next_comp->flags, cycle_command_line, &cursor_pos);
+                        const wcstring new_cmd_line = completion_apply_to_command_line(next_comp->completion, next_comp->flags, cycle_command_line, &cursor_pos, false);
                         reader_set_buffer(new_cmd_line, cursor_pos);
 
                         /* Since we just inserted a completion, don't immediately do a new autosuggestion */
@@ -2913,35 +3040,43 @@ const wchar_t *reader_readline()
                 else
                 {
                     /* Either the user hit tab only once, or we had no visible completion list. */
-                    const wchar_t *begin, *end;
+                    const wchar_t *cmdsub_begin, *cmdsub_end;
                     const wchar_t *token_begin, *token_end;
-                    const wchar_t *buff = data->command_line.c_str();
-                    long cursor_steps;
+                    const wchar_t * const buff = data->command_line.c_str();
 
                     /* Clear the completion list */
                     comp.clear();
 
-                    parse_util_cmdsubst_extent(buff, data->buff_pos, &begin, &end);
+                    /* Figure out the extent of the command substitution surrounding the cursor. This is because we only look at the current command substitution to form completions - stuff happening outside of it is not interesting. */
+                    parse_util_cmdsubst_extent(buff, data->buff_pos, &cmdsub_begin, &cmdsub_end);
 
-                    parse_util_token_extent(begin, data->buff_pos - (begin-buff), &token_begin, &token_end, 0, 0);
+                    /* Figure out the extent of the token within the command substitution. Note we pass cmdsub_begin here, not buff */
+                    parse_util_token_extent(cmdsub_begin, data->buff_pos - (cmdsub_begin-buff), &token_begin, &token_end, 0, 0);
 
-                    cursor_steps = token_end - buff- data->buff_pos;
-                    data->buff_pos += cursor_steps;
-                    if (is_backslashed(buff, data->buff_pos))
+                    /* Figure out how many steps to get from the current position to the end of the current token. */
+                    size_t end_of_token_offset = token_end - buff;
+
+                    /* Move the cursor to the end */
+                    if (data->buff_pos != end_of_token_offset)
+                    {
+                        data->buff_pos = end_of_token_offset;
+                        reader_repaint();
+                    }
+
+                    /* Remove a trailing backslash. This may trigger an extra repaint, but this is rare. */
+                    if (is_backslashed(data->command_line, data->buff_pos))
                     {
                         remove_backward();
                     }
 
-                    reader_repaint();
+                    /* Construct a copy of the string from the beginning of the command substitution up to the end of the token we're completing */
+                    const wcstring buffcpy = wcstring(cmdsub_begin, token_end);
 
-                    size_t len = data->buff_pos - (begin-buff);
-                    const wcstring buffcpy = wcstring(begin, len);
-
-                    data->complete_func(buffcpy, comp, COMPLETE_DEFAULT, NULL);
+                    //fprintf(stderr, "Complete (%ls)\n", buffcpy.c_str());
+                    data->complete_func(buffcpy, comp, COMPLETION_REQUEST_DEFAULT | COMPLETION_REQUEST_DESCRIPTIONS, NULL);
 
                     /* Munge our completions */
-                    sort(comp.begin(), comp.end());
-                    remove_duplicates(comp);
+                    sort_and_make_unique(comp);
                     prioritize_completions(comp);
 
                     /* Record our cycle_command_line */
@@ -2952,6 +3087,9 @@ const wchar_t *reader_readline()
 
                     /* Start the cycle at the beginning */
                     completion_cycle_idx = (size_t)(-1);
+                    
+                    /* Repaint */
+                    reader_repaint_if_needed();
                 }
 
                 break;
@@ -2987,17 +3125,22 @@ const wchar_t *reader_readline()
                     const wchar_t *end = &buff[data->buff_pos];
                     const wchar_t *begin = end;
 
+                    /* Make sure we delete at least one character (see #580) */
+                    begin--;
+
+                    /* Delete until we hit a newline, or the beginning of the string */
                     while (begin > buff  && *begin != L'\n')
                         begin--;
 
+                    /* If we landed on a newline, don't delete it */
                     if (*begin == L'\n')
                         begin++;
 
+                    assert(end >= begin);
                     size_t len = maxi<size_t>(end-begin, 1);
                     begin = end - len;
 
                     reader_kill(begin - buff, len, KILL_PREPEND, last_char!=R_BACKWARD_KILL_LINE);
-
                 }
                 break;
 
@@ -3117,13 +3260,14 @@ const wchar_t *reader_readline()
                 /* Delete any autosuggestion */
                 data->autosuggestion.clear();
 
-                /*
-                 Allow backslash-escaped newlines
-                 */
-                if (is_backslashed(data->command_line.c_str(), data->buff_pos))
+                /* Allow backslash-escaped newlines, but only if the following character is whitespace, or we're at the end of the text (see issue #163) */
+                if (is_backslashed(data->command_line, data->buff_pos))
                 {
-                    insert_char('\n');
-                    break;
+                    if (data->buff_pos >= data->command_length() || iswspace(data->command_line.at(data->buff_pos)))
+                    {
+                        insert_char('\n');
+                        break;
+                    }
                 }
 
                 switch (data->test_func(data->command_line.c_str()))
@@ -3131,12 +3275,10 @@ const wchar_t *reader_readline()
 
                     case 0:
                     {
-                        /*
-                         Finished commend, execute it
-                         */
-                        if (! data->command_line.empty())
+                        /* Finished command, execute it. Don't add items that start with a leading space. */
+                        if (! data->command_line.empty() && data->command_line.at(0) != L' ')
                         {
-                            if (data->history)
+                            if (data->history != NULL)
                             {
                                 data->history->add_with_file_detection(data->command_line);
                             }
@@ -3467,7 +3609,7 @@ static int read_ni(int fd, const io_chain_t &io)
     wchar_t *buff=0;
     std::vector<char> acc;
 
-    int des = fd == 0 ? dup(0) : fd;
+    int des = (fd == STDIN_FILENO ? dup(STDIN_FILENO) : fd);
     int res=0;
 
     if (des == -1)
@@ -3484,17 +3626,27 @@ static int read_ni(int fd, const io_chain_t &io)
             char buff[4096];
             size_t c = fread(buff, 1, 4096, in_stream);
 
-            if (ferror(in_stream) && (errno != EINTR))
+            if (ferror(in_stream))
             {
-                debug(1,
-                      _(L"Error while reading from file descriptor"));
+                if (errno == EINTR)
+                {
+                    /* We got a signal, just keep going. Be sure that we call insert() below because we may get data as well as EINTR. */
+                    clearerr(in_stream);
+                }
+                else if ((errno == EAGAIN || errno == EWOULDBLOCK) && make_fd_blocking(des) == 0)
+                {
+                    /* We succeeded in making the fd blocking, keep going */
+                    clearerr(in_stream);
+                }
+                else
+                {
+                    /* Fatal error */
+                    debug(1, _(L"Error while reading from file descriptor"));
 
-                /*
-                  Reset buffer on error. We won't evaluate incomplete files.
-                */
-                acc.clear();
-                break;
-
+                    /* Reset buffer on error. We won't evaluate incomplete files. */
+                    acc.clear();
+                    break;
+                }
             }
 
             acc.insert(acc.end(), buff, buff + c);

@@ -25,10 +25,6 @@ parts of fish.
 #include <dirent.h>
 #include <sys/types.h>
 
-#ifdef HAVE_SYS_TERMIOS_H
-#include <sys/termios.h>
-#endif
-
 #ifdef HAVE_SYS_IOCTL_H
 #include <sys/ioctl.h>
 #endif
@@ -54,10 +50,6 @@ parts of fish.
 #include <ncurses.h>
 #else
 #include <curses.h>
-#endif
-
-#if HAVE_TERMIO_H
-#include <termio.h>
 #endif
 
 #if HAVE_TERM_H
@@ -112,11 +104,10 @@ void show_stackframe()
         return;
 
     void *trace[32];
-    char **messages = (char **)NULL;
     int i, trace_size = 0;
 
     trace_size = backtrace(trace, 32);
-    messages = backtrace_symbols(trace, trace_size);
+    char **messages = backtrace_symbols(trace, trace_size);
 
     if (messages)
     {
@@ -480,15 +471,21 @@ wcstring vformat_string(const wchar_t *format, va_list va_orig)
     return result;
 }
 
-void append_format(wcstring &str, const wchar_t *format, ...)
+void append_formatv(wcstring &str, const wchar_t *format, va_list ap)
 {
     /* Preserve errno across this call since it likes to stomp on it */
     int err = errno;
+    str.append(vformat_string(format, ap));
+    errno = err;
+
+}
+
+void append_format(wcstring &str, const wchar_t *format, ...)
+{
     va_list va;
     va_start(va, format);
-    str.append(vformat_string(format, va));
+    append_formatv(str, format, va);
     va_end(va);
-    errno = err;
 }
 
 wchar_t *wcsvarname(const wchar_t *str)
@@ -557,12 +554,8 @@ wchar_t *quote_end(const wchar_t *pos)
 wcstring wsetlocale(int category, const wchar_t *locale)
 {
 
-    char *lang = NULL;
-    if (locale)
-    {
-        lang = wcs2str(locale);
-    }
-    char * res = setlocale(category,lang);
+    char *lang = locale ? wcs2str(locale) : NULL;
+    char *res = setlocale(category, lang);
     free(lang);
 
     /*
@@ -575,7 +568,7 @@ wcstring wsetlocale(int category, const wchar_t *locale)
 
     // U+23CE is the "return" character
     omitted_newline_char = unicode ? L'\x23CE' : L'~';
-
+    
     if (!res)
         return wcstring();
     else
@@ -1979,18 +1972,21 @@ void exit_without_destructors(int code)
 }
 
 /* Helper function to convert from a null_terminated_array_t<wchar_t> to a null_terminated_array_t<char_t> */
-null_terminated_array_t<char> convert_wide_array_to_narrow(const null_terminated_array_t<wchar_t> &wide_arr)
+void convert_wide_array_to_narrow(const null_terminated_array_t<wchar_t> &wide_arr, null_terminated_array_t<char> *output)
 {
     const wchar_t *const *arr = wide_arr.get();
     if (! arr)
-        return null_terminated_array_t<char>();
+    {
+        output->clear();
+        return;
+    }
 
     std::vector<std::string> list;
     for (size_t i=0; arr[i]; i++)
     {
         list.push_back(wcs2string(arr[i]));
     }
-    return null_terminated_array_t<char>(list);
+    output->set(list);
 }
 
 void append_path_component(wcstring &path, const wcstring &component)
@@ -2167,4 +2163,69 @@ bool wcstokenizer::next(wcstring &result)
 wcstokenizer::~wcstokenizer()
 {
     free(buffer);
+}
+
+
+template <typename CharType_t>
+static CharType_t **make_null_terminated_array_helper(const std::vector<std::basic_string<CharType_t> > &argv)
+{
+    size_t count = argv.size();
+
+    /* We allocate everything in one giant block. First compute how much space we need. */
+
+    /* N + 1 pointers */
+    size_t pointers_allocation_len = (count + 1) * sizeof(CharType_t *);
+
+    /* In the very unlikely event that CharType_t has stricter alignment requirements than does a pointer, round us up to the size of a CharType_t */
+    pointers_allocation_len += sizeof(CharType_t) - 1;
+    pointers_allocation_len -= pointers_allocation_len % sizeof(CharType_t);
+
+    /* N null terminated strings */
+    size_t strings_allocation_len = 0;
+    for (size_t i=0; i < count; i++)
+    {
+        /* The size of the string, plus a null terminator */
+        strings_allocation_len += (argv.at(i).size() + 1) * sizeof(CharType_t);
+    }
+
+    /* Now allocate their sum */
+    unsigned char *base = static_cast<unsigned char *>(malloc(pointers_allocation_len + strings_allocation_len));
+    if (! base) return NULL;
+
+    /* Divvy it up into the pointers and strings */
+    CharType_t **pointers = reinterpret_cast<CharType_t **>(base);
+    CharType_t *strings = reinterpret_cast<CharType_t *>(base + pointers_allocation_len);
+
+    /* Start copying */
+    for (size_t i=0; i < count; i++)
+    {
+        const std::basic_string<CharType_t> &str = argv.at(i);
+        // store the current string pointer into self
+        *pointers++ = strings;
+
+        // copy the string into strings
+        strings = std::copy(str.begin(), str.end(), strings);
+        // each string needs a null terminator
+        *strings++ = (CharType_t)(0);
+    }
+    // array of pointers needs a null terminator
+    *pointers++ = NULL;
+
+    // Make sure we know what we're doing
+    assert((unsigned char *)pointers - base == (std::ptrdiff_t)pointers_allocation_len);
+    assert((unsigned char *)strings - (unsigned char *)pointers == (std::ptrdiff_t)strings_allocation_len);
+    assert((unsigned char *)strings - base == (std::ptrdiff_t)(pointers_allocation_len + strings_allocation_len));
+
+    // Return what we did
+    return reinterpret_cast<CharType_t**>(base);
+}
+
+wchar_t **make_null_terminated_array(const wcstring_list_t &lst)
+{
+    return make_null_terminated_array_helper(lst);
+}
+
+char **make_null_terminated_array(const std::vector<std::string> &lst)
+{
+    return make_null_terminated_array_helper(lst);
 }

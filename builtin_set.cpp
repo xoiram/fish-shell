@@ -65,17 +65,28 @@ static int my_env_set(const wchar_t *key, const wcstring_list_t &val, int scope)
     if (is_path_variable(key))
     {
         /* Fix for https://github.com/fish-shell/fish-shell/issues/199 . Return success if any path setting succeeds. */
-        bool any_success = false, any_error = false;
+        bool any_success = false;
+
+        /* Don't bother validating (or complaining about) values that are already present */
+        wcstring_list_t existing_values;
+        const env_var_t existing_variable = env_get_string(key);
+        if (! existing_variable.missing_or_empty())
+            tokenize_variable_array(existing_variable, existing_values);
 
         for (i=0; i< val.size() ; i++)
         {
+            const wcstring &dir = val.at(i);
+            if (list_contains_string(existing_values, dir))
+            {
+                any_success = true;
+                continue;
+            }
+
             bool show_perror = false;
             int show_hint = 0;
             bool error = false;
 
             struct stat buff;
-            const wchar_t *dir = val[i].c_str();
-
             if (wstat(dir, &buff))
             {
                 error = true;
@@ -93,10 +104,8 @@ static int my_env_set(const wchar_t *key, const wcstring_list_t &val, int scope)
             }
             else
             {
-                any_error = true;
-                const wchar_t *colon;
-                append_format(stderr_buffer, _(BUILTIN_SET_PATH_ERROR), L"set", dir, key);
-                colon = wcschr(dir, L':');
+                append_format(stderr_buffer, _(BUILTIN_SET_PATH_ERROR), L"set", dir.c_str(), key);
+                const wchar_t *colon = wcschr(dir.c_str(), L':');
 
                 if (colon && *(colon+1))
                 {
@@ -112,7 +121,7 @@ static int my_env_set(const wchar_t *key, const wcstring_list_t &val, int scope)
 
             if (show_hint)
             {
-                append_format(stderr_buffer, _(BUILTIN_SET_PATH_HINT), L"set", key, key, wcschr(dir, L':')+1);
+                append_format(stderr_buffer, _(BUILTIN_SET_PATH_HINT), L"set", key, key, wcschr(dir.c_str(), L':')+1);
             }
 
         }
@@ -126,7 +135,7 @@ static int my_env_set(const wchar_t *key, const wcstring_list_t &val, int scope)
     }
 
     wcstring sb;
-    if (val.size())
+    if (! val.empty())
     {
         for (i=0; i< val.size() ; i++)
         {
@@ -314,7 +323,7 @@ static void erase_values(wcstring_list_t &list, const std::vector<long> &indexes
 
     // Now walk the set backwards, so we encounter larger indexes first, and remove elements at the given (1-based) indexes.
     std::set<long>::const_reverse_iterator iter;
-    for (iter = indexes_set.rbegin(); iter != indexes_set.rend(); iter++)
+    for (iter = indexes_set.rbegin(); iter != indexes_set.rend(); ++iter)
     {
         long val = *iter;
         if (val > 0 && (size_t)val <= list.size())
@@ -362,7 +371,7 @@ static void print_variables(int include_values, int esc, bool shorten_ok, int sc
 
                 if (shorten)
                 {
-                    stdout_buffer.append(L"\u2026");
+                    stdout_buffer.push_back(ellipsis_char);
                 }
 
             }
@@ -380,58 +389,21 @@ static void print_variables(int include_values, int esc, bool shorten_ok, int sc
 */
 static int builtin_set(parser_t &parser, wchar_t **argv)
 {
-
-    /**
-       Variables used for parsing the argument list
-    */
-    static const struct woption
-            long_options[] =
+    /** Variables used for parsing the argument list */
+    const struct woption long_options[] =
     {
-        {
-            L"export", no_argument, 0, 'x'
-        }
-        ,
-        {
-            L"global", no_argument, 0, 'g'
-        }
-        ,
-        {
-            L"local", no_argument, 0, 'l'
-        }
-        ,
-        {
-            L"erase", no_argument, 0, 'e'
-        }
-        ,
-        {
-            L"names", no_argument, 0, 'n'
-        }
-        ,
-        {
-            L"unexport", no_argument, 0, 'u'
-        }
-        ,
-        {
-            L"universal", no_argument, 0, 'U'
-        }
-        ,
-        {
-            L"long", no_argument, 0, 'L'
-        }
-        ,
-        {
-            L"query", no_argument, 0, 'q'
-        }
-        ,
-        {
-            L"help", no_argument, 0, 'h'
-        }
-        ,
-        {
-            0, 0, 0, 0
-        }
-    }
-    ;
+        { L"export", no_argument, 0, 'x' },
+        { L"global", no_argument, 0, 'g' },
+        { L"local", no_argument, 0, 'l' },
+        { L"erase", no_argument, 0, 'e' },
+        { L"names", no_argument, 0, 'n' },
+        { L"unexport", no_argument, 0, 'u' },
+        { L"universal", no_argument, 0, 'U' },
+        { L"long", no_argument, 0, 'L' },
+        { L"query", no_argument, 0, 'q' },
+        { L"help", no_argument, 0, 'h' },
+        { 0, 0, 0, 0 }
+    } ;
 
     const wchar_t *short_options = L"+xglenuULqh";
 
@@ -444,6 +416,8 @@ static int builtin_set(parser_t &parser, wchar_t **argv)
     int erase = 0, list = 0, unexport=0;
     int universal = 0, query=0;
     bool shorten_ok = true;
+    bool preserve_incoming_failure_exit_status = true;
+    const int incoming_exit_status = proc_get_last_status();
 
     /*
       Variables used for performing the actual work
@@ -475,10 +449,12 @@ static int builtin_set(parser_t &parser, wchar_t **argv)
 
             case 'e':
                 erase = 1;
+                preserve_incoming_failure_exit_status = false;
                 break;
 
             case 'n':
                 list = 1;
+                preserve_incoming_failure_exit_status = false;
                 break;
 
             case 'x':
@@ -507,6 +483,7 @@ static int builtin_set(parser_t &parser, wchar_t **argv)
 
             case 'q':
                 query = 1;
+                preserve_incoming_failure_exit_status = false;
                 break;
 
             case 'h':
@@ -826,6 +803,8 @@ static int builtin_set(parser_t &parser, wchar_t **argv)
 
     free(dest);
 
+    if (retcode == STATUS_BUILTIN_OK && preserve_incoming_failure_exit_status)
+        retcode = incoming_exit_status;
     return retcode;
 
 }

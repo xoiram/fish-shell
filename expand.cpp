@@ -15,6 +15,8 @@ parameter expansion.
 #include <errno.h>
 #include <pwd.h>
 #include <unistd.h>
+#include <limits.h>
+#include <sys/param.h>
 #include <sys/types.h>
 #include <sys/sysctl.h>
 #include <termios.h>
@@ -1352,7 +1354,7 @@ static int expand_cmdsubst(parser_t &parser, const wcstring &input, std::vector<
 
     const wcstring subcmd(paran_begin + 1, paran_end-paran_begin - 1);
 
-    if (exec_subshell(subcmd, sub_res) == -1)
+    if (exec_subshell(subcmd, sub_res, true /* do apply exit status */) == -1)
     {
         parser.error(CMDSUBST_ERROR, -1, L"Unknown error while evaulating command substitution");
         return 0;
@@ -1461,44 +1463,50 @@ static wcstring expand_unescape_string(const wcstring &in, int escape_special)
     return tmp;
 }
 
-/**
-   Attempts tilde expansion of the string specified, modifying it in place.
-*/
-static void expand_home_directory(wcstring &input)
+/* Given that input[0] is HOME_DIRECTORY or tilde (ugh), return the user's name. Return the empty string if it is just a tilde. Also return by reference the index of the first character of the remaining part of the string (e.g. the subsequent slash) */
+static wcstring get_home_directory_name(const wcstring &input, size_t *out_tail_idx)
 {
     const wchar_t * const in = input.c_str();
-    if (in[0] == HOME_DIRECTORY)
-    {
-        int tilde_error = 0;
-        size_t tail_idx;
-        wcstring home;
+    assert(in[0] == HOME_DIRECTORY || in[0] == L'~');
+    size_t tail_idx;
 
-        if (in[1] == '/' || in[1] == '\0')
+    const wchar_t *name_end = wcschr(in, L'/');
+    if (name_end)
+    {
+        tail_idx = name_end - in;
+    }
+    else
+    {
+        tail_idx = wcslen(in);
+    }
+    *out_tail_idx = tail_idx;
+    return input.substr(1, tail_idx - 1);
+}
+
+/** Attempts tilde expansion of the string specified, modifying it in place. */
+static void expand_home_directory(wcstring &input)
+{
+    if (! input.empty() && input.at(0) == HOME_DIRECTORY)
+    {
+        size_t tail_idx;
+        wcstring username = get_home_directory_name(input, &tail_idx);
+        
+        bool tilde_error = false;
+        wcstring home;
+        if (username.empty())
         {
             /* Current users home directory */
-
             home = env_get_string(L"HOME");
             tail_idx = 1;
         }
         else
         {
             /* Some other users home directory */
-            const wchar_t *name_end = wcschr(in, L'/');
-            if (name_end)
-            {
-                tail_idx = name_end - in;
-            }
-            else
-            {
-                tail_idx = wcslen(in);
-            }
-            wcstring name_str = input.substr(1, tail_idx - 1);
-            std::string name_cstr = wcs2string(name_str);
+            std::string name_cstr = wcs2string(username);
             struct passwd *userinfo = getpwnam(name_cstr.c_str());
-
             if (userinfo == NULL)
             {
-                tilde_error = 1;
+                tilde_error = true;
                 input[0] = L'~';
             }
             else
@@ -1516,10 +1524,56 @@ static void expand_home_directory(wcstring &input)
 
 void expand_tilde(wcstring &input)
 {
-    if (! input.empty() && input.at(0) == L'~')
+    // Avoid needless COW behavior by ensuring we use const at
+    const wcstring &tmp = input;
+    if (! tmp.empty() && tmp.at(0) == L'~')
     {
         input.at(0) = HOME_DIRECTORY;
         expand_home_directory(input);
+    }
+}
+
+static void unexpand_tildes(const wcstring &input, std::vector<completion_t> *completions)
+{
+    // If input begins with tilde, then try to replace the corresponding string in each completion with the tilde
+    // If it does not, there's nothing to do
+    if (input.empty() || input.at(0) != L'~')
+        return;
+    
+    // We only operate on completions that replace their contents
+    // If we don't have any, we're done.
+    // In particular, empty vectors are common.
+    bool has_candidate_completion = false;
+    for (size_t i=0; i < completions->size(); i++)
+    {
+        if (completions->at(i).flags & COMPLETE_REPLACES_TOKEN)
+        {
+            has_candidate_completion = true;
+            break;
+        }
+    }
+    if (! has_candidate_completion)
+        return;
+    
+    size_t tail_idx;
+    wcstring username_with_tilde = L"~";
+    username_with_tilde.append(get_home_directory_name(input, &tail_idx));
+    
+    // Expand username_with_tilde
+    wcstring home = username_with_tilde;
+    expand_tilde(home);
+    
+    // Now for each completion that starts with home, replace it with the username_with_tilde
+    for (size_t i=0; i < completions->size(); i++)
+    {
+        completion_t &comp = completions->at(i);
+        if ((comp.flags & COMPLETE_REPLACES_TOKEN) && string_prefixes_string(home, comp.completion))
+        {
+            comp.completion.replace(0, home.size(), username_with_tilde);
+            
+            // And mark that our tilde is literal, so it doesn't try to escape it
+            comp.flags |= COMPLETE_DONT_ESCAPE_TILDES;
+        }
     }
 }
 
@@ -1553,11 +1607,9 @@ static void remove_internal_separator(wcstring &str, bool conv)
 
 
 int expand_string(const wcstring &input, std::vector<completion_t> &output, expand_flags_t flags)
-{
+{    
     parser_t parser(PARSER_TYPE_ERRORS_ONLY, true /* show errors */);
-    std::vector<completion_t> list1, list2;
-    std::vector<completion_t> *in, *out;
-
+    
     size_t i;
     int res = EXPAND_OK;
 
@@ -1566,6 +1618,9 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
         output.push_back(completion_t(input));
         return EXPAND_OK;
     }
+    
+    std::vector<completion_t> clist1, clist2;
+    std::vector<completion_t> *in = &clist1, *out = &clist2;
 
     if (EXPAND_SKIP_CMDSUBST & flags)
     {
@@ -1579,18 +1634,15 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
             parser.error(CMDSUBST_ERROR, -1, L"Command substitutions not allowed");
             return EXPAND_ERROR;
         }
-        list1.push_back(completion_t(input));
+        in->push_back(completion_t(input));
     }
     else
     {
-        int cmdsubst_ok = expand_cmdsubst(parser, input, list1);
+        int cmdsubst_ok = expand_cmdsubst(parser, input, *in);
         if (! cmdsubst_ok)
             return EXPAND_ERROR;
     }
-
-    in = &list1;
-    out = &list2;
-
+    
     for (i=0; i < in->size(); i++)
     {
         /*
@@ -1622,9 +1674,7 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
     }
 
     in->clear();
-
-    in = &list2;
-    out = &list1;
+    std::swap(in, out); // note: this swaps the pointers only (last output is next input)
 
     for (i=0; i < in->size(); i++)
     {
@@ -1636,9 +1686,7 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
         }
     }
     in->clear();
-
-    in = &list1;
-    out = &list2;
+    std::swap(in, out); // note: this swaps the pointers only (last output is next input)
 
     for (i=0; i < in->size(); i++)
     {
@@ -1655,7 +1703,7 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
                 /*
                  If process expansion matches, we are not
                  interested in other completions, so we
-                 short-circut and return
+                 short-circuit and return
                  */
                 if (!(flags & EXPAND_SKIP_PROCESS))
                     expand_pid(next, flags, output);
@@ -1676,9 +1724,7 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
     }
 
     in->clear();
-
-    in = &list2;
-    out = &list1;
+    std::swap(in, out); // note: this swaps the pointers only (last output is next input)
 
     for (i=0; i < in->size(); i++)
     {
@@ -1692,7 +1738,6 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
                 wildcard_has(next, 1))
         {
             const wchar_t *start, *rest;
-            std::vector<completion_t> *list = out;
 
             if (next[0] == '/')
             {
@@ -1705,39 +1750,28 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
                 rest = next;
             }
 
+            std::vector<completion_t> expanded;
+            wc_res = wildcard_expand_string(rest, start, flags, expanded);
             if (flags & ACCEPT_INCOMPLETE)
             {
-                list = &output;
+                out->insert(out->end(), expanded.begin(), expanded.end());
             }
-
-            wc_res = wildcard_expand_string(rest, start, flags, *list);
-
-            if (!(flags & ACCEPT_INCOMPLETE))
+            else
             {
-
                 switch (wc_res)
                 {
                     case 0:
                     {
-                        if (!(flags & ACCEPT_INCOMPLETE))
-                        {
-                            if (res == EXPAND_OK)
-                                res = EXPAND_WILDCARD_NO_MATCH;
-                            break;
-                        }
+                        if (res == EXPAND_OK)
+                            res = EXPAND_WILDCARD_NO_MATCH;
+                        break;
                     }
 
                     case 1:
                     {
-                        size_t j;
                         res = EXPAND_WILDCARD_MATCH;
-                        sort_completions(*out);
-
-                        for (j=0; j< out->size(); j++)
-                        {
-                            output.push_back(out->at(j));
-                        }
-                        out->clear();
+                        sort_completions(expanded);
+                        out->insert(out->end(), expanded.begin(), expanded.end());
                         break;
                     }
 
@@ -1748,20 +1782,24 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
 
                 }
             }
-
         }
         else
         {
-            if (flags & ACCEPT_INCOMPLETE)
+            if (! (flags & ACCEPT_INCOMPLETE))
             {
-            }
-            else
-            {
-                output.push_back(completion_t(next));
+                out->push_back(completion_t(next_str));
             }
         }
-
     }
+    
+    // Hack to un-expand tildes (see #647)
+    if (! (flags & EXPAND_SKIP_HOME_DIRECTORIES))
+    {
+        unexpand_tildes(input, out);
+    }
+    
+    // Return our output
+    output.insert(output.end(), out->begin(), out->end());
 
     return res;
 }

@@ -1,7 +1,7 @@
 /** \file screen.c High level library for handling the terminal screen
 
 The screen library allows the interactive reader to write its
-output to screen efficiently by keeping an inetrnal representation
+output to screen efficiently by keeping an internal representation
 of the current screen contents and trying to find the most
 efficient way for transforming that to the desired screen content.
 */
@@ -15,10 +15,6 @@ efficient way for transforming that to the desired screen content.
 #include <termios.h>
 #include <sys/types.h>
 
-#ifdef HAVE_SYS_TERMIOS_H
-#include <sys/termios.h>
-#endif
-
 #include <unistd.h>
 #include <wctype.h>
 
@@ -26,10 +22,6 @@ efficient way for transforming that to the desired screen content.
 #include <ncurses.h>
 #else
 #include <curses.h>
-#endif
-
-#if HAVE_TERMIO_H
-#include <termio.h>
 #endif
 
 #if HAVE_TERM_H
@@ -1049,7 +1041,7 @@ struct screen_layout_t
 /* Given a vector whose indexes are offsets and whose values are the widths of the string if truncated at that offset, return the offset that fits in the given width. Returns width_by_offset.size() - 1 if they all fit. The first value in width_by_offset is assumed to be 0. */
 static size_t truncation_offset_for_width(const std::vector<size_t> &width_by_offset, size_t max_width)
 {
-    assert(width_by_offset.size() > 0 && width_by_offset.at(0) == 0);
+    assert(! width_by_offset.empty() && width_by_offset.at(0) == 0);
     size_t i;
     for (i=1; i < width_by_offset.size(); i++)
     {
@@ -1361,17 +1353,32 @@ void s_reset(screen_t *s, screen_reset_mode_t mode)
         /* Do the PROMPT_SP hack */
         int screen_width = common_get_width();
         wcstring abandon_line_string;
-        abandon_line_string.reserve(screen_width);
+        abandon_line_string.reserve(screen_width + 32); //should be enough
 
         int non_space_width = wcwidth(omitted_newline_char);
         if (screen_width >= non_space_width)
         {
-            abandon_line_string.append(L"\x1b[7m"); //invert text ANSI escape sequence
+            if (output_get_supports_term256())
+            {
+                // draw the string in term256 gray
+                abandon_line_string.append(L"\x1b[38;5;245m");
+            }
+            else
+            {
+                // draw in "bright black" (gray)
+                abandon_line_string.append(L"\x1b[0m" //bright
+                                           L"\x1b[30;1m"); //black
+            }
             abandon_line_string.push_back(omitted_newline_char);
             abandon_line_string.append(L"\x1b[0m"); //normal text ANSI escape sequence
             abandon_line_string.append(screen_width - non_space_width, L' ');
+
         }
         abandon_line_string.push_back(L'\r');
+        // now we are certainly on a new line. But we may have dropped the omitted newline char on it. So append enough spaces to overwrite the omitted newline char, and then
+        abandon_line_string.append(non_space_width, L' ');
+        abandon_line_string.push_back(L'\r');
+
         const std::string narrow_abandon_line_string = wcs2string(abandon_line_string);
         write_loop(STDOUT_FILENO, narrow_abandon_line_string.c_str(), narrow_abandon_line_string.size());
         s->actual.cursor.x = 0;

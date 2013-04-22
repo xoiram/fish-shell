@@ -36,7 +36,7 @@ complete -c scp -d "Remote Path" -n "echo (commandline -ct)|sgrep -o '.*:';and t
 	echo (commandline -ct)|sgrep -o '.*:'
 )(
 	#Get the list of remote files from the specified ssh server
-	ssh -o \"BatchMode yes\" (echo (commandline -ct)|sed -ne 's/\(.*\):.*/\1/p') ls\ -d\ (echo (commandline -ct)|sed -ne 's/.*://p')\*
+        ssh -o \"BatchMode yes\" (echo (commandline -ct)|sed -ne 's/\(.*\):.*/\1/p') ls\ -dp\ (echo (commandline -ct)|sed -ne 's/.*://p')\*
 )
 
 "
@@ -47,5 +47,5 @@ complete -c scp -s P -x --description "Port"
 complete -c scp -s p --description "Preserves modification times, access times, and modes from the original file"
 complete -c scp -s q --description "Do not display progress bar"
 complete -c scp -s r --description "Recursively copy"
-complete -c scp -s S --description "Encyption program"
+complete -c scp -s S --description "Encryption program"
 

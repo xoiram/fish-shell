@@ -75,21 +75,11 @@ enum
     */
     COMPLETE_NO_SPACE = 1 << 0,
 
-    /**
-       This compeltion is case insensitive.
+    /** This completion is case insensitive. */
+    COMPLETE_CASE_INSENSITIVE = 1 << 1,
 
-       Warning: The contents of the completion_t structure is actually
-       different if this flag is set! Specifically, the completion string
-       contains the _entire_ completion token, not only the current
-    */
-    COMPLETE_NO_CASE = 1 << 1,
-
-    /**
-       This compeltion is the whole argument, not just the remainder. This
-       flag must never be set on completions returned from the complete()
-       function. It is strictly for internal use in the completion code.
-    */
-    COMPLETE_WHOLE_ARGUMENT = 1 << 2,
+    /** This is not the suffix of a token, but replaces it entirely */
+    COMPLETE_REPLACES_TOKEN = 1 << 2,
 
     /**
        This completion may or may not want a space at the end - guess by
@@ -97,10 +87,11 @@ enum
     */
     COMPLETE_AUTO_SPACE = 1 << 3,
 
-    /**
-       This completion should be inserted as-is, without escaping.
-    */
-    COMPLETE_DONT_ESCAPE = 1 << 4
+    /** This completion should be inserted as-is, without escaping. */
+    COMPLETE_DONT_ESCAPE = 1 << 4,
+    
+    /** If you do escape, don't escape tildes */
+    COMPLETE_DONT_ESCAPE_TILDES = 1 << 5
 };
 typedef int complete_flags_t;
 
@@ -112,6 +103,9 @@ private:
     /* No public default constructor */
     completion_t();
 public:
+
+    /* Destructor. Not inlining it saves code size. */
+    ~completion_t();
 
     /**
        The completion string
@@ -127,7 +121,7 @@ public:
        Flags determining the completion behaviour.
 
        Determines whether a space should be inserted after this
-       compeltion if it is the only possible completion using the
+       completion if it is the only possible completion using the
        COMPLETE_NO_SPACE flag.
 
        The COMPLETE_NO_CASE can be used to signal that this completion
@@ -137,7 +131,7 @@ public:
 
     bool is_case_insensitive() const
     {
-        return !!(flags & COMPLETE_NO_CASE);
+        return !!(flags & COMPLETE_CASE_INSENSITIVE);
     }
 
     /* Construction. Note: defining these so that they are not inlined reduces the executable size. */
@@ -151,11 +145,14 @@ public:
     bool operator != (const completion_t& rhs) const;
 };
 
-enum complete_type_t
+enum
 {
-    COMPLETE_DEFAULT,
-    COMPLETE_AUTOSUGGEST
+    COMPLETION_REQUEST_DEFAULT = 0,
+    COMPLETION_REQUEST_AUTOSUGGESTION = 1 << 0, // indicates the completion is for an autosuggestion
+    COMPLETION_REQUEST_DESCRIPTIONS = 1 << 1, // indicates that we want descriptions
+    COMPLETION_REQUEST_FUZZY_MATCH = 1 << 2 // indicates that we don't require a prefix match
 };
+typedef uint32_t completion_request_flags_t;
 
 /** Given a list of completions, returns a list of their completion fields */
 wcstring_list_t completions_to_wcstring_list(const std::vector<completion_t> &completions);
@@ -240,7 +237,7 @@ void complete_remove(const wchar_t *cmd,
  */
 void complete(const wcstring &cmd,
               std::vector<completion_t> &comp,
-              complete_type_t type,
+              completion_request_flags_t flags,
               wcstring_list_t *to_load = NULL);
 
 /**
@@ -291,5 +288,7 @@ void complete_load(const wcstring &cmd, bool reload);
 */
 void append_completion(std::vector<completion_t> &completions, const wcstring &comp, const wcstring &desc = L"", int flags = 0);
 
+/* Function used for testing */
+void complete_set_variable_names(const wcstring_list_t *names);
 
 #endif

@@ -46,12 +46,12 @@
 #define RECONNECT_COUNT 32
 
 
-connection_t env_universal_server;
+connection_t env_universal_server(-1);
 
 /**
-   Set to 1 after initialization has been performed
+   Set to true after initialization has been performed
 */
-static int init = 0;
+static bool s_env_univeral_inited = false;
 
 /**
    The number of attempts to start fishd
@@ -80,7 +80,7 @@ static int is_dead()
 
 static int try_get_socket_once(void)
 {
-    int s, len;
+    int s;
 
     wchar_t *wdir;
     wchar_t *wuname;
@@ -128,7 +128,6 @@ static int try_get_socket_once(void)
     struct sockaddr_un local = {};
     local.sun_family = AF_UNIX;
     strncpy(local.sun_path, name.c_str(), (sizeof local.sun_path) - 1);
-    len = sizeof(local);
 
     if (connect(s, (struct sockaddr *)&local, sizeof local) == -1)
     {
@@ -136,7 +135,7 @@ static int try_get_socket_once(void)
         return -1;
     }
 
-    if ((fcntl(s, F_SETFL, O_NONBLOCK) != 0) || (fcntl(s, F_SETFD, FD_CLOEXEC) != 0))
+    if ((make_fd_nonblocking(s) != 0) || (fcntl(s, F_SETFD, FD_CLOEXEC) != 0))
     {
         wperror(L"fcntl");
         close(s);
@@ -206,9 +205,9 @@ static void callback(fish_message_type_t type, const wchar_t *name, const wchar_
    Make sure the connection is healthy. If not, close it, and try to
    establish a new connection.
 */
-static void check_connection()
+static void check_connection(void)
 {
-    if (!init)
+    if (! s_env_univeral_inited)
         return;
 
     if (env_universal_server.killme)
@@ -259,10 +258,11 @@ static void reconnect()
 
     debug(3, L"Get new fishd connection");
 
-    init = 0;
-    env_universal_server.buffer_consumed = env_universal_server.buffer_used = 0;
+    s_env_univeral_inited = false;
+    env_universal_server.buffer_consumed = 0;
+    env_universal_server.read_buffer.clear();
     env_universal_server.fd = get_socket();
-    init = 1;
+    s_env_univeral_inited = true;
     if (env_universal_server.fd >= 0)
     {
         env_universal_remove_all();
@@ -281,12 +281,10 @@ void env_universal_init(wchar_t * p,
     start_fishd=sf;
     external_callback = cb;
 
-    connection_init(&env_universal_server, -1);
-
     env_universal_server.fd = get_socket();
     env_universal_common_init(&callback);
     env_universal_read_all();
-    init = 1;
+    s_env_univeral_inited = true;
     if (env_universal_server.fd >= 0)
     {
         env_universal_barrier();
@@ -309,8 +307,7 @@ void env_universal_destroy()
 
     connection_destroy(&env_universal_server);
     env_universal_server.fd =-1;
-    env_universal_common_destroy();
-    init = 0;
+    s_env_univeral_inited = false;
 }
 
 
@@ -319,7 +316,7 @@ void env_universal_destroy()
 */
 int env_universal_read_all()
 {
-    if (!init)
+    if (! s_env_univeral_inited)
         return 0;
 
     if (env_universal_server.fd == -1)
@@ -342,17 +339,17 @@ int env_universal_read_all()
     }
 }
 
-wchar_t *env_universal_get(const wcstring &name)
+const wchar_t *env_universal_get(const wcstring &name)
 {
-    if (!init)
-        return 0;
+    if (!s_env_univeral_inited)
+        return NULL;
 
     return env_universal_common_get(name);
 }
 
 bool env_universal_get_export(const wcstring &name)
 {
-    if (!init)
+    if (!s_env_univeral_inited)
         return false;
 
     return env_universal_common_get_export(name);
@@ -364,7 +361,7 @@ void env_universal_barrier()
     message_t *msg;
     fd_set fds;
 
-    if (!init || is_dead())
+    if (!s_env_univeral_inited || is_dead())
         return;
 
     barrier_reply = 0;
@@ -374,7 +371,7 @@ void env_universal_barrier()
     */
     msg= create_message(BARRIER, 0, 0);
     msg->count=1;
-    env_universal_server.unsent->push(msg);
+    env_universal_server.unsent.push(msg);
 
     /*
       Wait until barrier request has been sent
@@ -385,7 +382,7 @@ void env_universal_barrier()
         try_send_all(&env_universal_server);
         check_connection();
 
-        if (env_universal_server.unsent->empty())
+        if (env_universal_server.unsent.empty())
             break;
 
         if (env_universal_server.fd == -1)
@@ -425,7 +422,7 @@ void env_universal_set(const wcstring &name, const wcstring &value, bool exportv
 {
     message_t *msg;
 
-    if (!init)
+    if (!s_env_univeral_inited)
         return;
 
     debug(3, L"env_universal_set( \"%ls\", \"%ls\" )", name.c_str(), value.c_str());
@@ -447,7 +444,7 @@ void env_universal_set(const wcstring &name, const wcstring &value, bool exportv
         }
 
         msg->count=1;
-        env_universal_server.unsent->push(msg);
+        env_universal_server.unsent.push(msg);
         env_universal_barrier();
     }
 }
@@ -457,7 +454,7 @@ int env_universal_remove(const wchar_t *name)
     int res;
 
     message_t *msg;
-    if (!init)
+    if (!s_env_univeral_inited)
         return 1;
 
     CHECK(name, 1);
@@ -475,18 +472,18 @@ int env_universal_remove(const wchar_t *name)
     {
         msg= create_message(ERASE, name, 0);
         msg->count=1;
-        env_universal_server.unsent->push(msg);
+        env_universal_server.unsent.push(msg);
         env_universal_barrier();
     }
 
     return res;
 }
 
-void env_universal_get_names2(wcstring_list_t &lst,
-                              bool show_exported,
-                              bool show_unexported)
+void env_universal_get_names(wcstring_list_t &lst,
+                             bool show_exported,
+                             bool show_unexported)
 {
-    if (!init)
+    if (!s_env_univeral_inited)
         return;
 
     env_universal_common_get_names(lst,

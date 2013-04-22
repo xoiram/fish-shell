@@ -167,7 +167,7 @@ static const io_chain_t *real_io;
 static int builtin_count_args(wchar_t **argv)
 {
     int argc = 1;
-    while (argv[argc] != 0)
+    while (argv[argc] != NULL)
     {
         argc++;
     }
@@ -211,11 +211,15 @@ static int count_char(const wchar_t *str, wchar_t c)
 
 wcstring builtin_help_get(parser_t &parser, const wchar_t *name)
 {
+    /* This won't ever work if no_exec is set */
+    if (no_exec)
+        return wcstring();
+    
     wcstring_list_t lst;
     wcstring out;
     const wcstring name_esc = escape_string(name, 1);
     const wcstring cmd = format_string(L"__fish_print_help %ls", name_esc.c_str());
-    if (exec_subshell(cmd, lst) >= 0)
+    if (exec_subshell(cmd, lst, false /* don't apply exit status */) >= 0)
     {
         for (size_t i=0; i<lst.size(); i++)
         {
@@ -390,6 +394,8 @@ static void builtin_missing_argument(parser_t &parser, const wchar_t *cmd, const
 #include "builtin_complete.cpp"
 #include "builtin_ulimit.cpp"
 #include "builtin_jobs.cpp"
+#include "builtin_set_color.cpp"
+#include "builtin_printf.cpp"
 
 /* builtin_test lives in builtin_test.cpp */
 int builtin_test(parser_t &parser, wchar_t **argv);
@@ -465,10 +471,10 @@ static int builtin_bind_add(const wchar_t *seq, const wchar_t *cmd, int terminfo
 
     if (terminfo)
     {
-        const wchar_t *seq2 = input_terminfo_get_sequence(seq);
-        if (seq2)
+        wcstring seq2;
+        if (input_terminfo_get_sequence(seq, &seq2))
         {
-            input_mapping_add(seq2, cmd);
+            input_mapping_add(seq2.c_str(), cmd);
         }
         else
         {
@@ -1170,7 +1176,7 @@ static void functions_def(const wcstring &name, wcstring &out)
 
 
     wcstring_list_t named = function_get_named_arguments(name);
-    if (named.size() > 0)
+    if (! named.empty())
     {
         append_format(out, L" --argument");
         for (size_t i=0; i < named.size(); i++)
@@ -1737,7 +1743,6 @@ static int builtin_function(parser_t &parser, wchar_t **argv)
     int res=STATUS_BUILTIN_OK;
     wchar_t *desc=0;
     std::vector<event_t> events;
-
     std::auto_ptr<wcstring_list_t> named_arguments(NULL);
 
     wchar_t *name = 0;
@@ -1748,50 +1753,19 @@ static int builtin_function(parser_t &parser, wchar_t **argv)
     function_def_block_t * const fdb = new function_def_block_t();
     parser.push_block(fdb);
 
-    static const struct woption
-            long_options[] =
+    const struct woption long_options[] =
     {
-        {
-            L"description", required_argument, 0, 'd'
-        }
-        ,
-        {
-            L"on-signal", required_argument, 0, 's'
-        }
-        ,
-        {
-            L"on-job-exit", required_argument, 0, 'j'
-        }
-        ,
-        {
-            L"on-process-exit", required_argument, 0, 'p'
-        }
-        ,
-        {
-            L"on-variable", required_argument, 0, 'v'
-        }
-        ,
-        {
-            L"on-event", required_argument, 0, 'e'
-        }
-        ,
-        {
-            L"help", no_argument, 0, 'h'
-        }
-        ,
-        {
-            L"argument-names", no_argument, 0, 'a'
-        }
-        ,
-        {
-            L"no-scope-shadowing", no_argument, 0, 'S'
-        }
-        ,
-        {
-            0, 0, 0, 0
-        }
-    }
-    ;
+        { L"description", required_argument, 0, 'd' },
+        { L"on-signal", required_argument, 0, 's' },
+        { L"on-job-exit", required_argument, 0, 'j' },
+        { L"on-process-exit", required_argument, 0, 'p' },
+        { L"on-variable", required_argument, 0, 'v' },
+        { L"on-event", required_argument, 0, 'e' },
+        { L"help", no_argument, 0, 'h' },
+        { L"argument-names", no_argument, 0, 'a' },
+        { L"no-scope-shadowing", no_argument, 0, 'S' },
+        { 0, 0, 0, 0 }
+    };
 
     while (1 && (!res))
     {
@@ -2075,7 +2049,6 @@ static int builtin_function(parser_t &parser, wchar_t **argv)
     parser.current_block->skip = 1;
 
     return STATUS_BUILTIN_OK;
-
 }
 
 /**
@@ -2399,6 +2372,7 @@ static int builtin_read(parser_t &parser, wchar_t **argv)
         }
         /* No autosuggestions in builtin_read */
         reader_set_allow_autosuggesting(false);
+        reader_set_exit_on_interrupt(true);
 
         reader_set_buffer(commandline, wcslen(commandline));
         proc_push_interactive(1);
@@ -3478,7 +3452,7 @@ static int builtin_end(parser_t &parser, wchar_t **argv)
            are rewinding a loop, this should be set to false, so that
            variables in the current loop scope won't die between laps.
         */
-        int kill_block = 1;
+        bool kill_block = true;
 
         switch (parser.current_block->type())
         {
@@ -3492,7 +3466,7 @@ static int builtin_end(parser_t &parser, wchar_t **argv)
                 {
                     parser.current_block->loop_status = LOOP_NORMAL;
                     parser.current_block->skip = 0;
-                    kill_block = 0;
+                    kill_block = false;
                     parser.set_pos(parser.current_block->tok_pos);
                     while_block_t *blk = static_cast<while_block_t *>(parser.current_block);
                     blk->status = WHILE_TEST_AGAIN;
@@ -3529,11 +3503,11 @@ static int builtin_end(parser_t &parser, wchar_t **argv)
                     const wcstring val = for_vars.back();
                     for_vars.pop_back();
                     const wcstring &for_variable = fb->variable;
-                    env_set(for_variable.c_str(), val.c_str(),  ENV_LOCAL);
+                    env_set(for_variable, val.c_str(),  ENV_LOCAL);
                     parser.current_block->loop_status = LOOP_NORMAL;
                     parser.current_block->skip = 0;
 
-                    kill_block = 0;
+                    kill_block = false;
                     parser.set_pos(parser.current_block->tok_pos);
                 }
                 break;
@@ -4024,11 +3998,13 @@ static const builtin_data_t builtin_datas[]=
     { 		L"jobs",  &builtin_jobs, N_(L"Print currently running jobs")   },
     { 		L"not",  &builtin_generic, N_(L"Negate exit status of job")  },
     { 		L"or",  &builtin_generic, N_(L"Execute command if previous command failed")  },
+    { 		L"printf",  &builtin_printf, N_(L"Prints formatted text")  },
     { 		L"pwd",  &builtin_pwd, N_(L"Print the working directory")  },
     { 		L"random",  &builtin_random, N_(L"Generate random number")  },
     { 		L"read",  &builtin_read, N_(L"Read a line of input into variables")   },
     { 		L"return",  &builtin_return, N_(L"Stop the currently evaluated function")   },
     { 		L"set",  &builtin_set, N_(L"Handle environment variables")   },
+    { 		L"set_color",  &builtin_set_color, N_(L"Set the terminal color")   },
     { 		L"status",  &builtin_status, N_(L"Return status information about fish")  },
     { 		L"switch",  &builtin_switch, N_(L"Conditionally execute a block of commands")   },
     { 		L"test",  &builtin_test, N_(L"Test a condition")   },

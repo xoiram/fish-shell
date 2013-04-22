@@ -31,7 +31,7 @@
    output of the builtin. This is surprisingly cheap on my computer,
    probably because of the marvels of copy on write forking.
 
-   This rule is short circuted in the case where a builtin does not
+   This rule is short circuited in the case where a builtin does not
    output to a pipe and does in fact not output anything. The speed
    improvement from this optimization is not noticable on a normal
    computer/OS in regular use, but the promiscous amounts of forking
@@ -54,8 +54,8 @@ void exec(parser_t &parser, job_t *j);
 
   \return the status of the last job to exit, or -1 if en error was encountered.
 */
-__warn_unused int exec_subshell(const wcstring &cmd, std::vector<wcstring> &outputs);
-__warn_unused int exec_subshell(const wcstring &cmd);
+int exec_subshell(const wcstring &cmd, std::vector<wcstring> &outputs, bool preserve_exit_status);
+int exec_subshell(const wcstring &cmd, bool preserve_exit_status);
 
 
 /**

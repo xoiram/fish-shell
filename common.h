@@ -125,8 +125,8 @@ extern const wchar_t *program_name;
 /**
    This macro is used to check that an input argument is not null. It
    is a bit lika a non-fatal form of assert. Instead of exit-ing on
-   failiure, the current function is ended at once. The second
-   parameter is the return value of the current function on failiure.
+   failure, the current function is ended at once. The second
+   parameter is the return value of the current function on failure.
 */
 #define CHECK( arg, retval )											\
 	if (!(arg)) 														\
@@ -150,7 +150,7 @@ extern const wchar_t *program_name;
 		read( 0, &exit_read_buff, 1 );			\
 		exit_without_destructors( 1 );												\
 	}															\
-	
+ 
 
 /**
    Exit program at once, leaving an error message about running out of memory.
@@ -182,7 +182,7 @@ extern const wchar_t *program_name;
 /**
    Shorthand for wgettext call
 */
-#define _(wstr) wgettext((const wchar_t *)wstr)
+#define _(wstr) wgettext(wstr)
 
 /**
    Noop, used to tell xgettext that a string should be translated,
@@ -203,7 +203,7 @@ void show_stackframe();
 
 /**
    Read a line from the stream f into the string. Returns
-   the number of bytes read or -1 on failiure.
+   the number of bytes read or -1 on failure.
 
    If the carriage return character is encountered, it is
    ignored. fgetws() considers the line to end if reading the file
@@ -330,6 +330,8 @@ inline wcstring to_string(const int &x)
     return to_string(static_cast<long>(x));
 }
 
+wchar_t **make_null_terminated_array(const wcstring_list_t &lst);
+char **make_null_terminated_array(const std::vector<std::string> &lst);
 
 /* Helper class for managing a null-terminated array of null-terminated strings (of some char type) */
 template <typename CharType_t>
@@ -337,133 +339,61 @@ class null_terminated_array_t
 {
     CharType_t **array;
 
-    typedef std::basic_string<CharType_t> string_t;
-    typedef std::vector<string_t> string_list_t;
+    /* No assignment or copying */
+    void operator=(null_terminated_array_t rhs);
+    null_terminated_array_t(const null_terminated_array_t &);
 
-    void swap(null_terminated_array_t<CharType_t> &him)
-    {
-        std::swap(array, him.array);
-    }
-
-    /* Silly function to get the length of a null terminated array of...something */
-    template <typename T>
-    static size_t count_not_null(const T *arr)
-    {
-        size_t len;
-        for (len=0; arr[len] != T(0); len++)
-            ;
-        return len;
-    }
+    typedef std::vector<std::basic_string<CharType_t> > string_list_t;
 
     size_t size() const
     {
-        return count_not_null(array);
+        size_t len = 0;
+        if (array != NULL)
+        {
+            while (array[len] != NULL)
+            {
+                len++;
+            }
+        }
+        return len;
     }
 
     void free(void)
     {
-        if (array != NULL)
-        {
-            for (size_t i = 0; array[i] != NULL; i++)
-            {
-                delete [] array[i];
-            }
-            delete [] array;
-            array = NULL;
-        }
+        ::free((void *)array);
+        array = NULL;
     }
 
 public:
     null_terminated_array_t() : array(NULL) { }
-    null_terminated_array_t(const string_list_t &argv) : array(NULL)
+    null_terminated_array_t(const string_list_t &argv) : array(make_null_terminated_array(argv))
     {
-        this->set(argv);
     }
+
     ~null_terminated_array_t()
     {
         this->free();
     }
 
-    /** operator=. Notice the pass-by-value parameter. */
-    null_terminated_array_t& operator=(null_terminated_array_t rhs)
-    {
-        if (this != &rhs)
-            this->swap(rhs);
-        return *this;
-    }
-
-    /* Copy constructor. */
-    null_terminated_array_t(const null_terminated_array_t &him) : array(NULL)
-    {
-        this->set(him.array);
-    }
-
     void set(const string_list_t &argv)
     {
-        /* Get rid of the old argv */
         this->free();
-
-        /* Allocate our null-terminated array of null-terminated strings */
-        size_t i, count = argv.size();
-        this->array = new CharType_t * [count + 1];
-        for (i=0; i < count; i++)
-        {
-            const string_t &str = argv.at(i);
-            this->array[i] = new CharType_t [1 + str.size()];
-            std::copy(str.begin(), str.end(), this->array[i]);
-            this->array[i][str.size()] = CharType_t(0);
-        }
-        this->array[count] = NULL;
+        this->array = make_null_terminated_array(argv);
     }
 
-    void set(const CharType_t * const *new_array)
-    {
-        if (new_array == array)
-            return;
-
-        /* Get rid of the old argv */
-        this->free();
-
-        /* Copy the new one */
-        if (new_array)
-        {
-            size_t i, count = count_not_null(new_array);
-            this->array = new CharType_t * [count + 1];
-            for (i=0; i < count; i++)
-            {
-                size_t len = count_not_null(new_array[i]);
-                this->array[i] = new CharType_t [1 + len];
-                std::copy(new_array[i], new_array[i] + len, this->array[i]);
-                this->array[i][len] = CharType_t(0);
-            }
-            this->array[count] = NULL;
-        }
-    }
-
-    CharType_t **get()
-    {
-        return array;
-    }
     const CharType_t * const *get() const
     {
         return array;
     }
 
-    string_list_t to_list() const
+    void clear()
     {
-        string_list_t lst;
-        if (array != NULL)
-        {
-            size_t count = this->size();
-            lst.reserve(count);
-            lst.insert(lst.end(), array, array + count);
-        }
-        return lst;
+        this->free();
     }
 };
 
 /* Helper function to convert from a null_terminated_array_t<wchar_t> to a null_terminated_array_t<char_t> */
-null_terminated_array_t<char> convert_wide_array_to_narrow(const null_terminated_array_t<wchar_t> &arr);
+void convert_wide_array_to_narrow(const null_terminated_array_t<wchar_t> &arr, null_terminated_array_t<char> *output);
 
 /* Helper class to cache a narrow version of a wcstring in a malloc'd buffer, so that we can read it after fork() */
 class narrow_string_rep_t
@@ -514,6 +444,47 @@ public:
     ~scoped_lock();
 };
 
+
+/**
+   A scoped manager to save the current value of some variable, and optionally
+   set it to a new value. On destruction it restores the variable to its old
+   value.
+
+   This can be handy when there are multiple code paths to exit a block.
+*/
+template <typename T>
+class scoped_push
+{
+    T * const ref;
+    T saved_value;
+    bool restored;
+
+public:
+    scoped_push(T *r): ref(r), saved_value(*r), restored(false)
+    {
+    }
+
+    scoped_push(T *r, const T &new_value) : ref(r), saved_value(*r), restored(false)
+    {
+        *r = new_value;
+    }
+
+    ~scoped_push()
+    {
+        restore();
+    }
+
+    void restore()
+    {
+        if (!restored)
+        {
+            std::swap(*ref, saved_value);
+            restored = true;
+        }
+    }
+};
+
+
 /* Wrapper around wcstok */
 class wcstokenizer
 {
@@ -538,6 +509,7 @@ void append_path_component(wcstring &path, const wcstring &component);
 wcstring format_string(const wchar_t *format, ...);
 wcstring vformat_string(const wchar_t *format, va_list va_orig);
 void append_format(wcstring &str, const wchar_t *format, ...);
+void append_formatv(wcstring &str, const wchar_t *format, va_list ap);
 
 /**
    Returns a newly allocated wide character string array equivalent of
@@ -621,13 +593,13 @@ __sentinel bool contains_internal(const wcstring &needle, ...);
 long read_blocked(int fd, void *buf, size_t count);
 
 /**
-   Loop a write request while failiure is non-critical. Return -1 and set errno
+   Loop a write request while failure is non-critical. Return -1 and set errno
    in case of critical error.
  */
 ssize_t write_loop(int fd, const char *buff, size_t count);
 
 /**
-   Loop a read request while failiure is non-critical. Return -1 and set errno
+   Loop a read request while failure is non-critical. Return -1 and set errno
    in case of critical error.
  */
 ssize_t read_loop(int fd, void *buff, size_t count);

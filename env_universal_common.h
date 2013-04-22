@@ -76,20 +76,28 @@ typedef std::queue<message_t *> message_queue_t;
 /**
    This struct represents a connection between a universal variable server/client
 */
-typedef struct connection
+class connection_t
 {
+private:
+    /* No assignment */
+    connection_t &operator=(const connection_t &);
+
+public:
+
     /**
        The file descriptor this socket lives on
     */
     int fd;
+
     /**
-       Queue of onsent messages
+       Queue of unsent messages
     */
-    message_queue_t *unsent;
+    std::queue<message_t *> unsent;
+
     /**
        Set to one when this connection should be killed
     */
-    int killme;
+    bool killme;
     /**
        The input string. Input from the socket goes here. When a
        newline is encountered, the buffer is parsed and cleared.
@@ -99,25 +107,16 @@ typedef struct connection
     /**
        The read buffer.
     */
-    char buffer[ENV_UNIVERSAL_BUFFER_SIZE];
+    std::vector<char> read_buffer;
 
     /**
        Number of bytes that have already been consumed.
     */
     size_t buffer_consumed;
 
-    /**
-       Number of bytes that have been read into the buffer.
-    */
-    size_t buffer_used;
-
-
-    /**
-       Link to the next connection
-    */
-    struct connection *next;
-}
-connection_t;
+    /* Constructor */
+    connection_t(int input_fd);
+};
 
 /**
    Read all available messages on this connection
@@ -138,11 +137,6 @@ message_t *create_message(fish_message_type_t type, const wchar_t *key, const wc
    Init the library
 */
 void env_universal_common_init(void (*cb)(fish_message_type_t type, const wchar_t *key, const wchar_t *val));
-
-/**
-   Destroy library data
-*/
-void env_universal_common_destroy();
 
 /**
    Add all variable names to the specified list
@@ -182,7 +176,7 @@ void env_universal_common_remove(const wcstring &key);
    This function operate agains the local copy of all universal
    variables, it does not communicate with any other process.
 */
-wchar_t *env_universal_common_get(const wcstring &name);
+const wchar_t *env_universal_common_get(const wcstring &name);
 
 /**
    Get the export flag of the variable with the specified
@@ -197,12 +191,6 @@ bool env_universal_common_get_export(const wcstring &name);
    Add messages about all existing variables to the specified connection
 */
 void enqueue_all(connection_t *c);
-
-/**
-   Fill in the specified connection_t struct. Use the specified file
-   descriptor for communication.
-*/
-void connection_init(connection_t *c, int fd);
 
 /**
    Close and destroy the specified connection struct. This frees

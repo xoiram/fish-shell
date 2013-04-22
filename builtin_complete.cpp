@@ -98,7 +98,7 @@ static void  builtin_complete_add2(const wchar_t *cmd,
                      flags);
     }
 
-    if (old_opt.size() == 0 && gnu_opt.size() == 0 && wcslen(short_opt) == 0)
+    if (old_opt.empty() && gnu_opt.empty() && wcslen(short_opt) == 0)
     {
         complete_add(cmd,
                      cmd_type,
@@ -204,7 +204,7 @@ static void  builtin_complete_remove2(const wchar_t *cmd,
     {
         for (; *s; s++)
         {
-            if (old_opt.size() == 0 && gnu_opt.size() == 0)
+            if (old_opt.empty() && gnu_opt.empty())
             {
                 complete_remove(cmd,
                                 cmd_type,
@@ -497,14 +497,14 @@ static int builtin_complete(parser_t &parser, wchar_t **argv)
     {
         if (condition && wcslen(condition))
         {
-            if (parser.test(condition, 0, 0, 0))
+            if (parser.test(condition))
             {
                 append_format(stderr_buffer,
                               L"%ls: Condition '%ls' contained a syntax error\n",
                               argv[0],
                               condition);
 
-                parser.test(condition, 0, &stderr_buffer, argv[0]);
+                parser.test(condition, NULL, &stderr_buffer, argv[0]);
 
                 res = true;
             }
@@ -545,7 +545,7 @@ static int builtin_complete(parser_t &parser, wchar_t **argv)
                 recursion_level++;
 
                 std::vector<completion_t> comp;
-                complete(do_complete_param, comp, COMPLETE_DEFAULT);
+                complete(do_complete_param, comp, COMPLETION_REQUEST_DEFAULT);
 
                 for (size_t i=0; i< comp.size() ; i++)
                 {
@@ -553,7 +553,7 @@ static int builtin_complete(parser_t &parser, wchar_t **argv)
 
                     const wchar_t *prepend;
 
-                    if (next.flags & COMPLETE_NO_CASE)
+                    if (next.flags & COMPLETE_REPLACES_TOKEN)
                     {
                         prepend = L"";
                     }

@@ -85,7 +85,7 @@ void reader_repaint_if_needed();
    Run the specified command with the correct terminal modes, and
    while taking care to perform job notification, set the title, etc.
 */
-void reader_run_command(const wchar_t *buff);
+void reader_run_command(const wcstring &buff);
 
 /**
    Get the string of character currently entered into the command
@@ -118,6 +118,29 @@ size_t reader_get_cursor_pos();
 int reader_interrupted();
 
 /**
+   Clear the interrupted flag unconditionally without handling anything. The
+   flag could have been set e.g. when an interrupt arrived just as we were
+   ending an earlier \c reader_readline invocation but before the
+   \c is_interactive_read flag was cleared.
+*/
+void reader_reset_interrupted();
+
+/**
+   Return the value of the interrupted flag, which is set by the sigint
+   handler, and clear it if it was set. If the current reader is interruptible,
+   call \c reader_exit().
+*/
+int reader_reading_interrupted();
+
+/**
+   Returns true if the current reader generation count does not equal the
+   generation count the current thread was started with.
+   Note 1: currently only valid for autocompletion threads! Other threads don't
+   set the threadlocal generation count when they start up.
+*/
+bool reader_thread_job_is_stale();
+
+/**
    Read one line of input. Before calling this function, reader_push()
    must have been called in order to set up a valid reader
    environment.
@@ -140,7 +163,7 @@ void reader_pop();
    - The command to be completed as a null terminated array of wchar_t
    - An array_list_t in which completions will be inserted.
 */
-typedef void (*complete_function_t)(const wcstring &, std::vector<completion_t> &, complete_type_t, wcstring_list_t * lst);
+typedef void (*complete_function_t)(const wcstring &, std::vector<completion_t> &, completion_request_flags_t, wcstring_list_t * lst);
 void reader_set_complete_function(complete_function_t);
 
 /**
@@ -181,6 +204,9 @@ void reader_set_right_prompt(const wcstring &prompt);
 /** Sets whether autosuggesting is allowed. */
 void reader_set_allow_autosuggesting(bool flag);
 
+/** Sets whether the reader should exit on ^C. */
+void reader_set_exit_on_interrupt(bool flag);
+
 /**
    Returns true if the shell is exiting, 0 otherwise.
 */
@@ -216,6 +242,9 @@ int reader_search_mode();
 
 /* Given a command line and an autosuggestion, return the string that gets shown to the user. Exposed for testing purposes only. */
 wcstring combine_command_and_autosuggestion(const wcstring &cmdline, const wcstring &autosuggestion);
+
+/* Apply a completion string. Exposed for testing only. */
+wcstring completion_apply_to_command_line(const wcstring &val_str, complete_flags_t flags, const wcstring &command_line, size_t *inout_cursor_pos, bool append_only);
 
 
 #endif

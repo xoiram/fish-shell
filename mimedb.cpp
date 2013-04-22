@@ -156,7 +156,7 @@ static int launch_pos=0;
    gettext alias
 */
 #ifdef USE_GETTEXT
-#define _(string) gettext(string)
+#define _(string) fish_gettext(string)
 #else
 #define _(string) (string)
 #endif
@@ -297,7 +297,7 @@ static char *file_exists(const char *dir, const char *in)
    from xdg_run_command_on_dirs.
 
    \param list Full file paths will be appended to this list.
-   \param f The relative filename search for the the data directories.
+   \param f The relative filename search for the data directories.
    \param all If zero, then stop after the first filename.
    \return The number of filenames added to the list.
 */
@@ -1210,8 +1210,8 @@ static void launch(char *filter, const string_list_t &files, size_t fileno)
 static void locale_init()
 {
     setlocale(LC_ALL, "");
-    bindtextdomain(PACKAGE_NAME, LOCALEDIR);
-    textdomain(PACKAGE_NAME);
+    fish_bindtextdomain(PACKAGE_NAME, LOCALEDIR);
+    fish_textdomain(PACKAGE_NAME);
 }
 
 

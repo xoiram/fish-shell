@@ -202,7 +202,7 @@ static struct config_paths_t determine_config_directory_paths(const char *argv0)
         paths.data = L"" DATADIR "/fish";
         paths.sysconf = L"" SYSCONFDIR "/fish";
         paths.doc = L"" DATADIR "/doc/fish";
-        paths.bin = L"" PREFIX "/bin";
+        paths.bin = L"" BINDIR;
 
         done = true;
     }
@@ -460,6 +460,9 @@ int main(int argc, char **argv)
     const io_chain_t empty_ios;
     if (read_init(paths))
     {
+        /* Stop the exit status of any initialization commands (#635) */
+        proc_set_last_status(STATUS_BUILTIN_OK);
+        
         /* Run the commands specified as arguments, if any */
         if (! cmds.empty())
         {
@@ -551,5 +554,6 @@ int main(int argc, char **argv)
     if (g_log_forks)
         printf("%d: g_fork_count: %d\n", __LINE__, g_fork_count);
 
-    return res?STATUS_UNKNOWN_COMMAND:proc_get_last_status();
+    exit_without_destructors(res ? STATUS_UNKNOWN_COMMAND : proc_get_last_status());
+    return EXIT_FAILURE; //above line should always exit
 }

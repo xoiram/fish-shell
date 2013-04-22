@@ -143,15 +143,13 @@ int wildcard_has(const wchar_t *str, int internal)
    \param wc The wildcard.
    \param is_first Whether files beginning with dots should not be matched against wildcards.
 */
-static bool wildcard_match2(const wchar_t *str,
-                            const wchar_t *wc,
-                            bool is_first)
+static bool wildcard_match_internal(const wchar_t *str, const wchar_t *wc, bool leading_dots_fail_to_match, bool is_first)
 {
     if (*str == 0 && *wc==0)
         return true;
 
-    /* Hackish fix for https://github.com/fish-shell/fish-shell/issues/270. Prevent wildcards from matching . or .., but we must still allow literal matches. */
-    if (is_first && contains(str, L".", L".."))
+    /* Hackish fix for https://github.com/fish-shell/fish-shell/issues/270 . Prevent wildcards from matching . or .., but we must still allow literal matches. */
+    if (leading_dots_fail_to_match && is_first && contains(str, L".", L".."))
     {
         /* The string is '.' or '..'. Return true if the wildcard exactly matches. */
         return ! wcscmp(str, wc);
@@ -160,7 +158,7 @@ static bool wildcard_match2(const wchar_t *str,
     if (*wc == ANY_STRING || *wc == ANY_STRING_RECURSIVE)
     {
         /* Ignore hidden file */
-        if (is_first && *str == L'.')
+        if (leading_dots_fail_to_match && is_first && *str == L'.')
         {
             return false;
         }
@@ -168,7 +166,7 @@ static bool wildcard_match2(const wchar_t *str,
         /* Try all submatches */
         do
         {
-            if (wildcard_match2(str, wc+1, false))
+            if (wildcard_match_internal(str, wc+1, leading_dots_fail_to_match, false))
                 return true;
         }
         while (*(str++) != 0);
@@ -190,11 +188,11 @@ static bool wildcard_match2(const wchar_t *str,
             return false;
         }
 
-        return wildcard_match2(str+1, wc+1, false);
+        return wildcard_match_internal(str+1, wc+1, leading_dots_fail_to_match, false);
     }
 
     if (*wc == *str)
-        return wildcard_match2(str+1, wc+1, false);
+        return wildcard_match_internal(str+1, wc+1, leading_dots_fail_to_match, false);
 
     return false;
 }
@@ -225,7 +223,7 @@ static bool wildcard_complete_internal(const wcstring &orig,
         wcstring out_completion;
         wcstring out_desc = (desc ? desc : L"");
 
-        if (flags & COMPLETE_NO_CASE)
+        if (flags & COMPLETE_REPLACES_TOKEN)
         {
             out_completion = orig;
         }
@@ -292,7 +290,7 @@ static bool wildcard_complete_internal(const wcstring &orig,
     }
     else if (towlower(*wc) == towlower(*str))
     {
-        return wildcard_complete_internal(orig, str+1, wc+1, 0, desc, desc_func, out, flags | COMPLETE_NO_CASE);
+        return wildcard_complete_internal(orig, str+1, wc+1, 0, desc, desc_func, out, flags | COMPLETE_CASE_INSENSITIVE | COMPLETE_REPLACES_TOKEN);
     }
     return false;
 }
@@ -310,9 +308,9 @@ bool wildcard_complete(const wcstring &str,
 }
 
 
-bool wildcard_match(const wcstring &str, const wcstring &wc)
+bool wildcard_match(const wcstring &str, const wcstring &wc, bool leading_dots_fail_to_match)
 {
-    return wildcard_match2(str.c_str(), wc.c_str(), true);
+    return wildcard_match_internal(str.c_str(), wc.c_str(), leading_dots_fail_to_match, true /* first */);
 }
 
 /**
@@ -336,9 +334,9 @@ static wcstring complete_get_desc_suffix_internal(const wcstring &suff)
     wcstring_list_t lst;
     wcstring desc;
 
-    if (exec_subshell(cmd, lst) != -1)
+    if (exec_subshell(cmd, lst, false /* do not apply exit status */) != -1)
     {
-        if (lst.size()>0)
+        if (! lst.empty())
         {
             const wcstring & ln = lst.at(0);
             if (ln.size() > 0 && ln != L"unknown")
@@ -620,7 +618,7 @@ static void wildcard_completion_allocate(std::vector<completion_t> &list,
     bool wants_desc = !(expand_flags & EXPAND_NO_DESCRIPTIONS);
     wcstring desc;
     if (wants_desc)
-        desc = file_get_desc(fullname.c_str(), lstat_res, lbuf, stat_res, buf, stat_errno);
+        desc = file_get_desc(fullname, lstat_res, lbuf, stat_res, buf, stat_errno);
 
     if (sz >= 0 && S_ISDIR(buf.st_mode))
     {
@@ -703,8 +701,7 @@ static int wildcard_expand_internal(const wchar_t *wc,
                                     expand_flags_t flags,
                                     std::vector<completion_t> &out,
                                     std::set<wcstring> &completion_set,
-                                    std::set<file_id_t> &visited_files
-                                   )
+                                    std::set<file_id_t> &visited_files)
 {
 
     /* Points to the end of the current wildcard segment */
@@ -728,7 +725,7 @@ static int wildcard_expand_internal(const wchar_t *wc,
 
     //  debug( 3, L"WILDCARD_EXPAND %ls in %ls", wc, base_dir );
 
-    if (reader_interrupted())
+    if (is_main_thread() ? reader_interrupted() : reader_thread_job_is_stale())
     {
         return -1;
     }
@@ -822,20 +819,19 @@ static int wildcard_expand_internal(const wchar_t *wc,
             /*
               This is the last wildcard segment, and it is not empty. Match files/directories.
             */
-            wcstring next;
-            while (wreaddir(dir, next))
+            wcstring name_str;
+            while (wreaddir(dir, name_str))
             {
-                const wchar_t * const name = next.c_str();
                 if (flags & ACCEPT_INCOMPLETE)
                 {
 
-                    const wcstring long_name = make_path(base_dir, next);
+                    const wcstring long_name = make_path(base_dir, name_str);
 
                     /*
                       Test for matches before stating file, so as to minimize the number of calls to the much slower stat function
                     */
                     std::vector<completion_t> test;
-                    if (wildcard_complete(name,
+                    if (wildcard_complete(name_str,
                                           wc,
                                           L"",
                                           0,
@@ -846,7 +842,7 @@ static int wildcard_expand_internal(const wchar_t *wc,
                         {
                             wildcard_completion_allocate(out,
                                                          long_name,
-                                                         name,
+                                                         name_str,
                                                          wc,
                                                          flags);
 
@@ -855,9 +851,9 @@ static int wildcard_expand_internal(const wchar_t *wc,
                 }
                 else
                 {
-                    if (wildcard_match2(name, wc, true))
+                    if (wildcard_match(name_str, wc, true /* skip files with leading dots */))
                     {
-                        const wcstring long_name = make_path(base_dir, next);
+                        const wcstring long_name = make_path(base_dir, name_str);
                         int skip = 0;
 
                         if (is_recursive)
@@ -941,16 +937,14 @@ static int wildcard_expand_internal(const wchar_t *wc,
 
         wcscpy(new_dir, base_dir);
 
-        wcstring next;
-        while (wreaddir(dir, next))
+        wcstring name_str;
+        while (wreaddir(dir, name_str))
         {
-            const wchar_t *name = next.c_str();
-
             /*
               Test if the file/directory name matches the whole
               wildcard element, i.e. regular matching.
             */
-            int whole_match = wildcard_match2(name, wc_str, true);
+            int whole_match = wildcard_match(name_str, wc_str, true /* ignore leading dots */);
             int partial_match = 0;
 
             /*
@@ -963,7 +957,7 @@ static int wildcard_expand_internal(const wchar_t *wc,
             {
                 const wchar_t *end = wcschr(wc, ANY_STRING_RECURSIVE);
                 wchar_t *wc_sub = wcsndup(wc, end-wc+1);
-                partial_match = wildcard_match2(name, wc_sub, true);
+                partial_match = wildcard_match(name_str, wc_sub, true /* ignore leading dots */);
                 free(wc_sub);
             }
 
@@ -974,7 +968,7 @@ static int wildcard_expand_internal(const wchar_t *wc,
                 int stat_res;
                 int new_res;
 
-                wcscpy(&new_dir[base_len], name);
+                wcscpy(&new_dir[base_len], name_str.c_str());
                 dir_str = wcs2str(new_dir);
 
                 if (dir_str)
@@ -1095,7 +1089,7 @@ int wildcard_expand(const wchar_t *wc,
         {
             completion_t &c = out.at(i);
 
-            if (c.flags & COMPLETE_NO_CASE)
+            if (c.flags & COMPLETE_REPLACES_TOKEN)
             {
                 c.completion = format_string(L"%ls%ls%ls", base_dir, wc_base.c_str(), c.completion.c_str());
             }

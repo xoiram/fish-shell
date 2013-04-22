@@ -64,6 +64,7 @@ time the original barrier request was sent have been received.
 #include <errno.h>
 #include <locale.h>
 #include <signal.h>
+#include <list>
 
 #include "fallback.h"
 #include "util.h"
@@ -140,7 +141,8 @@ time the original barrier request was sent have been received.
 /**
    The list of connections to clients
 */
-static connection_t *conn;
+typedef std::list<connection_t> connection_list_t;
+static connection_list_t connections;
 
 /**
    The socket to accept new clients on
@@ -155,9 +157,8 @@ static int quit=0;
 /**
    Constructs the fish socket filename
 */
-static char *get_socket_filename()
+static std::string get_socket_filename(void)
 {
-    char *name;
     const char *dir = getenv("FISHD_SOCKET_DIR");
     char *uname = getenv("USER");
 
@@ -168,25 +169,20 @@ static char *get_socket_filename()
 
     if (uname == NULL)
     {
-        struct passwd *pw;
-        pw = getpwuid(getuid());
-        uname = strdup(pw->pw_name);
+        const struct passwd *pw = getpwuid(getuid());
+        uname = pw->pw_name;
     }
 
-    name = (char *)malloc(strlen(dir)+ strlen(uname)+ strlen(SOCK_FILENAME) + 2);
-    if (name == NULL)
-    {
-        wperror(L"get_socket_filename");
-        exit(EXIT_FAILURE);
-    }
-    strcpy(name, dir);
-    strcat(name, "/");
-    strcat(name, SOCK_FILENAME);
-    strcat(name, uname);
+    std::string name;
+    name.reserve(strlen(dir)+ strlen(uname)+ strlen(SOCK_FILENAME) + 1);
+    name.append(dir);
+    name.push_back('/');
+    name.append(SOCK_FILENAME);
+    name.append(uname);
 
-    if (strlen(name) >= UNIX_PATH_MAX)
+    if (name.size() >= UNIX_PATH_MAX)
     {
-        debug(1, L"Filename too long: '%s'", name);
+        debug(1, L"Filename too long: '%s'", name.c_str());
         exit(EXIT_FAILURE);
     }
     return name;
@@ -254,7 +250,7 @@ static void sprint_rand_digits(char *str, int maxlen)
  fallback.
  The memory returned should be freed using free().
  */
-static std::string gen_unique_nfs_filename(const char *filename)
+static std::string gen_unique_nfs_filename(const std::string &filename)
 {
     char hostname[HOST_NAME_MAX + 1];
     char pid_str[256];
@@ -401,7 +397,7 @@ static std::string get_machine_identifier(void)
  A unique temporary file named by appending characters to the lockfile name
  is used; any pre-existing file of the same name is subject to deletion.
  */
-static int acquire_lock_file(const char *lockfile, const int timeout, int force)
+static int acquire_lock_file(const std::string &lockfile_str, const int timeout, int force)
 {
     int fd, timed_out = 0;
     int ret = 0; /* early exit returns failure */
@@ -409,6 +405,7 @@ static int acquire_lock_file(const char *lockfile, const int timeout, int force)
     struct timeval start, end;
     double elapsed;
     struct stat statbuf;
+    const char * const lockfile = lockfile_str.c_str();
 
     /*
        (Re)create a unique file and check that it has one only link.
@@ -512,52 +509,47 @@ done:
    The returned string must be free()d after unlink()ing the file to release
    the lock
 */
-static char *acquire_socket_lock(const char *sock_name)
+static bool acquire_socket_lock(const std::string &sock_name, std::string *out_lockfile_name)
 {
-    size_t len = strlen(sock_name);
-    char *lockfile = (char *)malloc(len + strlen(LOCKPOSTFIX) + 1);
-
-    if (lockfile == NULL)
+    bool success = false;
+    std::string lockfile;
+    lockfile.reserve(sock_name.size() + strlen(LOCKPOSTFIX));
+    lockfile = sock_name;
+    lockfile.append(LOCKPOSTFIX);
+    if (acquire_lock_file(lockfile, LOCKTIMEOUT, 1))
     {
-        wperror(L"acquire_socket_lock");
-        exit(EXIT_FAILURE);
+        out_lockfile_name->swap(lockfile);
+        success = true;
     }
-    strcpy(lockfile, sock_name);
-    strcpy(lockfile + len, LOCKPOSTFIX);
-    if (!acquire_lock_file(lockfile, LOCKTIMEOUT, 1))
-    {
-        free(lockfile);
-        lockfile = NULL;
-    }
-    return lockfile;
+    return success;
 }
 
 /**
    Connects to the fish socket and starts listening for connections
 */
-static int get_socket()
+static int get_socket(void)
 {
     int s, len, doexit = 0;
     int exitcode = EXIT_FAILURE;
     struct sockaddr_un local;
-    char *sock_name = get_socket_filename();
+    const std::string sock_name = get_socket_filename();
 
     /*
        Start critical section protected by lock
     */
-    char *lockfile = acquire_socket_lock(sock_name);
-    if (lockfile == NULL)
+    std::string lockfile;
+    if (! acquire_socket_lock(sock_name, &lockfile))
     {
         debug(0, L"Unable to obtain lock on socket, exiting");
         exit(EXIT_FAILURE);
     }
-    debug(4, L"Acquired lockfile: %s", lockfile);
+    debug(4, L"Acquired lockfile: %s", lockfile.c_str());
 
     local.sun_family = AF_UNIX;
-    strcpy(local.sun_path, sock_name);
+    strcpy(local.sun_path, sock_name.c_str());
     len = sizeof(local);
 
-    debug(1, L"Connect to socket at %s", sock_name);
+    debug(1, L"Connect to socket at %s", sock_name.c_str());
 
     if ((s = socket(AF_UNIX, SOCK_STREAM, 0)) == -1)
     {
@@ -586,7 +578,7 @@ static int get_socket()
         goto unlock;
     }
 
-    if (fcntl(s, F_SETFL, O_NONBLOCK) != 0)
+    if (make_fd_nonblocking(s) != 0)
     {
         wperror(L"fcntl");
         close(s);
@@ -599,19 +591,15 @@ static int get_socket()
     }
 
 unlock:
-    (void)unlink(lockfile);
-    debug(4, L"Released lockfile: %s", lockfile);
+    (void)unlink(lockfile.c_str());
+    debug(4, L"Released lockfile: %s", lockfile.c_str());
     /*
        End critical section protected by lock
     */
 
-    free(lockfile);
-
-    free(sock_name);
-
     if (doexit)
     {
-        exit(exitcode);
+        exit_without_destructors(exitcode);
     }
 
     return s;
@@ -622,10 +610,9 @@ unlock:
 */
 static void broadcast(fish_message_type_t type, const wchar_t *key, const wchar_t *val)
 {
-    connection_t *c;
     message_t *msg;
 
-    if (!conn)
+    if (connections.empty())
         return;
 
     msg = create_message(type, key, val);
@@ -635,15 +622,15 @@ static void broadcast(fish_message_type_t type, const wchar_t *key, const wchar_
       prematurely
     */
 
-    for (c = conn; c; c=c->next)
+    for (connection_list_t::iterator iter = connections.begin(); iter != connections.end(); ++iter)
     {
         msg->count++;
-        c->unsent->push(msg);
+        iter->unsent.push(msg);
     }
 
-    for (c = conn; c; c=c->next)
+    for (connection_list_t::iterator iter = connections.begin(); iter != connections.end(); ++iter)
     {
-        try_send_all(c);
+        try_send_all(&*iter);
     }
 }
 
@@ -708,27 +695,20 @@ static void daemonize()
 }
 
 /**
-   Get environment variable value. The resulting string needs to be free'd.
+   Get environment variable value.
 */
-static wchar_t *fishd_env_get(const wchar_t *key)
+static env_var_t fishd_env_get(const char *key)
 {
-    char *nres, *nkey;
-    wchar_t *res;
-
-    nkey = wcs2str(key);
-    nres = getenv(nkey);
-    free(nkey);
-    if (nres)
+    const char *env = getenv(key);
+    if (env != NULL)
     {
-        wcstring tmp = str2wcstring(nres);
-        return wcsdup(tmp.c_str());
+        return env_var_t(str2wcstring(env));
     }
     else
     {
-        res = env_universal_common_get(key);
-        if (res)
-            res = wcsdup(res);
-        return res;
+        const wcstring wkey = str2wcstring(key);
+        const wchar_t *tmp = env_universal_common_get(wkey);
+        return tmp ? env_var_t(tmp) : env_var_t::missing_var();
     }
 }
 
@@ -740,12 +720,11 @@ static wchar_t *fishd_env_get(const wchar_t *key)
 */
 static wcstring fishd_get_config()
 {
-    wchar_t *xdg_dir, *home;
     bool done = false;
     wcstring result;
 
-    xdg_dir = fishd_env_get(L"XDG_CONFIG_HOME");
-    if (xdg_dir)
+    env_var_t xdg_dir = fishd_env_get("XDG_CONFIG_HOME");
+    if (! xdg_dir.missing_or_empty())
     {
         result = xdg_dir;
         append_path_component(result, L"/fish");
@@ -753,12 +732,11 @@ static wcstring fishd_get_config()
         {
             done = true;
         }
-        free(xdg_dir);
     }
     else
     {
-        home = fishd_env_get(L"HOME");
-        if (home)
+        env_var_t home = fishd_env_get("HOME");
+        if (! home.missing_or_empty())
         {
             result = home;
             append_path_component(result, L"/.config/fish");
@@ -766,7 +744,6 @@ static wcstring fishd_get_config()
             {
                 done = 1;
             }
-            free(home);
         }
     }
 
@@ -797,8 +774,7 @@ static bool load_or_save_variables_at_path(bool save, const std::string &path)
     {
         /* Success */
         result = true;
-        connection_t c = {};
-        connection_init(&c, fd);
+        connection_t c(fd);
 
         if (save)
         {
@@ -958,7 +934,6 @@ int main(int argc, char ** argv)
     init();
     while (1)
     {
-        connection_t *c;
         int res;
 
         t = sizeof(remote);
@@ -967,14 +942,15 @@ int main(int argc, char ** argv)
         FD_ZERO(&write_fd);
         FD_SET(sock, &read_fd);
         max_fd = sock+1;
-        for (c=conn; c; c=c->next)
+        for (connection_list_t::const_iterator iter = connections.begin(); iter != connections.end(); ++iter)
         {
-            FD_SET(c->fd, &read_fd);
-            max_fd = maxi(max_fd, c->fd+1);
+            const connection_t &c = *iter;
+            FD_SET(c.fd, &read_fd);
+            max_fd = maxi(max_fd, c.fd+1);
 
-            if (! c->unsent->empty())
+            if (! c.unsent.empty())
             {
-                FD_SET(c->fd, &write_fd);
+                FD_SET(c.fd, &write_fd);
             }
         }
 
@@ -1012,36 +988,34 @@ int main(int argc, char ** argv)
             {
                 debug(4, L"Connected with new child on fd %d", child_socket);
 
-                if (fcntl(child_socket, F_SETFL, O_NONBLOCK) != 0)
+                if (make_fd_nonblocking(child_socket) != 0)
                 {
                     wperror(L"fcntl");
                     close(child_socket);
                 }
                 else
                 {
-                    connection_t *newc = (connection_t *)malloc(sizeof(connection_t));
-                    connection_init(newc, child_socket);
-                    newc->next = conn;
-                    send(newc->fd, GREETING, strlen(GREETING), MSG_DONTWAIT);
-                    enqueue_all(newc);
-                    conn=newc;
+                    connections.push_front(connection_t(child_socket));
+                    connection_t &newc = connections.front();
+                    send(newc.fd, GREETING, strlen(GREETING), MSG_DONTWAIT);
+                    enqueue_all(&newc);
                 }
             }
         }
 
-        for (c=conn; c; c=c->next)
+        for (connection_list_t::iterator iter = connections.begin(); iter != connections.end(); ++iter)
         {
-            if (FD_ISSET(c->fd, &write_fd))
+            if (FD_ISSET(iter->fd, &write_fd))
             {
-                try_send_all(c);
+                try_send_all(&*iter);
             }
         }
 
-        for (c=conn; c; c=c->next)
+        for (connection_list_t::iterator iter = connections.begin(); iter != connections.end(); ++iter)
         {
-            if (FD_ISSET(c->fd, &read_fd))
+            if (FD_ISSET(iter->fd, &read_fd))
             {
-                read_message(c);
+                read_message(&*iter);
 
                 /*
                   Occasionally we save during normal use, so that we
@@ -1056,51 +1030,34 @@ int main(int argc, char ** argv)
             }
         }
 
-        connection_t *prev=0;
-        c=conn;
-
-        while (c)
+        for (connection_list_t::iterator iter = connections.begin(); iter != connections.end();)
         {
-            if (c->killme)
+            if (iter->killme)
             {
-                debug(4, L"Close connection %d", c->fd);
+                debug(4, L"Close connection %d", iter->fd);
 
-                while (! c->unsent->empty())
+                while (! iter->unsent.empty())
                 {
-                    message_t *msg = c->unsent->front();
-                    c->unsent->pop();
+                    message_t *msg = iter->unsent.front();
+                    iter->unsent.pop();
                     msg->count--;
-                    if (!msg->count)
+                    if (! msg->count)
                         free(msg);
                 }
 
-                connection_destroy(c);
-                if (prev)
-                {
-                    prev->next=c->next;
-                }
-                else
-                {
-                    conn=c->next;
-                }
-
-                free(c);
-
-                c=(prev?prev->next:conn);
-
+                connection_destroy(&*iter);
+                iter = connections.erase(iter);
             }
             else
             {
-                prev=c;
-                c=c->next;
+                ++iter;
             }
         }
 
-        if (!conn)
+        if (connections.empty())
         {
             debug(0, L"No more clients. Quitting");
             save();
-            env_universal_common_destroy();
             break;
         }
 

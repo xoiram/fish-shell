@@ -15,10 +15,6 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
-#ifdef HAVE_SYS_TERMIOS_H
-#include <sys/termios.h>
-#endif
-
 #ifdef HAVE_SYS_IOCTL_H
 #include <sys/ioctl.h>
 #endif
@@ -30,11 +26,6 @@
 #include <ncurses.h>
 #else
 #include <curses.h>
-#endif
-
-
-#if HAVE_TERMIO_H
-#include <termio.h>
 #endif
 
 #if HAVE_TERM_H
@@ -238,7 +229,7 @@ static std::vector<terminfo_mapping_t> mappings;
 /**
    Set to one when the input subsytem has been initialized.
 */
-static int is_init = 0;
+static bool is_init = false;
 
 /**
    Initialize terminfo.
@@ -250,17 +241,14 @@ static void input_terminfo_init();
    Returns the function description for the given function code.
 */
 
-void input_mapping_add(const wchar_t *sequence,
-                       const wchar_t *command)
+void input_mapping_add(const wchar_t *sequence, const wchar_t *command)
 {
-    size_t i;
     CHECK(sequence,);
     CHECK(command,);
 
     //  debug( 0, L"Add mapping from %ls to %ls", escape(sequence, 1), escape(command, 1 ) );
 
-
-    for (i=0; i<mapping_list.size(); i++)
+    for (size_t i=0; i<mapping_list.size(); i++)
     {
         input_mapping_t &m = mapping_list.at(i);
         if (m.seq == sequence)
@@ -292,7 +280,7 @@ static int interrupt_handler()
     /*
       Tell the reader an event occured
     */
-    if (reader_interrupted())
+    if (reader_reading_interrupted())
     {
         /*
           Return 3, i.e. the character read by a Control-C.
@@ -344,7 +332,7 @@ int input_init()
     if (is_init)
         return 1;
 
-    is_init = 1;
+    is_init = true;
 
     input_common_init(&interrupt_handler);
 
@@ -381,11 +369,11 @@ void input_destroy()
         return;
 
 
-    is_init=0;
+    is_init = false;
 
     input_common_destroy();
 
-    if (del_curterm(cur_term) == ERR)
+    if (fish_del_curterm(cur_term) == ERR)
     {
         debug(0, _(L"Error while closing terminfo"));
     }
@@ -507,7 +495,7 @@ wint_t input_readch()
     /*
        Clear the interrupted flag
        */
-    reader_interrupted();
+    reader_reset_interrupted();
 
     /*
        Search for sequence in mapping tables
@@ -783,12 +771,11 @@ static void input_terminfo_init()
     terminfo_mappings.insert(terminfo_mappings.end(), tinfos, tinfos + count);
 }
 
-const wchar_t *input_terminfo_get_sequence(const wchar_t *name)
+bool input_terminfo_get_sequence(const wchar_t *name, wcstring *out_seq)
 {
     ASSERT_IS_MAIN_THREAD();
 
     const char *res = 0;
-    static wcstring buff;
     int err = ENOENT;
 
     CHECK(name, 0);
@@ -808,11 +795,11 @@ const wchar_t *input_terminfo_get_sequence(const wchar_t *name)
     if (!res)
     {
         errno = err;
-        return 0;
-    }
-
-    buff = format_string(L"%s", res);
-    return buff.c_str();
+        return false;
+    }   
+    
+    *out_seq = format_string(L"%s", res);
+    return true;
 
 }
 
