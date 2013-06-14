@@ -2281,6 +2281,7 @@ size_t reader_get_cursor_pos()
 }
 
 #define ENV_CMD_DURATION L"CMD_DURATION"
+#define ENV_CMD_COMPLETE L"CMD_COMPLETE"
 
 void set_env_cmd_duration(struct timeval *after, struct timeval *before)
 {
@@ -2330,6 +2331,8 @@ void reader_run_command(parser_t &parser, const wcstring &cmd)
     struct timeval time_before, time_after;
 
     wcstring ft = tok_first(cmd.c_str());
+
+    env_set(ENV_CMD_COMPLETE, cmd.c_str(), ENV_GLOBAL);
 
     if (! ft.empty())
         env_set(L"_", ft.c_str(), ENV_GLOBAL);
