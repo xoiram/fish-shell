@@ -350,7 +350,7 @@ static int fish_parse_opt(int argc, char **argv, std::vector<std::string> *out_c
                 fwprintf(stderr,
                          _(L"%s, version %s\n"),
                          PACKAGE_NAME,
-                         PACKAGE_VERSION);
+                         FISH_BUILD_VERSION);
                 exit_without_destructors(0);
             }
 
@@ -380,36 +380,6 @@ static int fish_parse_opt(int argc, char **argv, std::vector<std::string> *out_c
     is_interactive_session |= force_interactive;
 
     return my_optind;
-}
-
-/**
-   Calls a bunch of init functions, parses the init files and then
-   parses commands from stdin or files, depending on arguments
-*/
-
-static wcstring full_escape(const wchar_t *in)
-{
-    wcstring out;
-    for (; *in; in++)
-    {
-        if (*in < 32)
-        {
-            append_format(out, L"\\x%.2x", *in);
-        }
-        else if (*in < 128)
-        {
-            out.push_back(*in);
-        }
-        else if (*in < 65536)
-        {
-            append_format(out, L"\\u%.4x", *in);
-        }
-        else
-        {
-            append_format(out, L"\\U%.8x", *in);
-        }
-    }
-    return out;
 }
 
 extern int g_fork_count;
