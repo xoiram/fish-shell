@@ -245,10 +245,10 @@ void parse_util_cmdsubst_extent(const wchar_t *buff, size_t cursor_pos, const wc
     const wchar_t * const cursor = buff + cursor_pos;
 
     CHECK(buff,);
-    
+
     const size_t bufflen = wcslen(buff);
     assert(cursor_pos <= bufflen);
-    
+
     /* ap and bp are the beginning and end of the tightest command substitition found so far */
     const wchar_t *ap = buff, *bp = buff + bufflen;
     const wchar_t *pos = buff;
@@ -260,19 +260,21 @@ void parse_util_cmdsubst_extent(const wchar_t *buff, size_t cursor_pos, const wc
             /* No subshell found, all done */
             break;
         }
-        
-        /* Intrepret NULL to mean the end */
+        /* Interpret NULL to mean the end */
         if (end == NULL)
         {
             end = const_cast<wchar_t *>(buff) + bufflen;
         }
-        
+
         if (begin < cursor && end >= cursor)
         {
             /* This command substitution surrounds the cursor, so it's a tighter fit */
             begin++;
             ap = begin;
             bp = end;
+            /* pos is where to begin looking for the next one. But if we reached the end there's no next one. */
+            if (begin >= end)
+                break;
             pos = begin + 1;
         }
         else if (begin >= cursor)
@@ -288,7 +290,7 @@ void parse_util_cmdsubst_extent(const wchar_t *buff, size_t cursor_pos, const wc
             assert(pos <= buff + bufflen);
         }
     }
-    
+
     if (a != NULL) *a = ap;
     if (b != NULL) *b = bp;
 }
@@ -381,6 +383,11 @@ static void job_or_process_extent(const wchar_t *buff,
 
                 break;
             }
+
+            default:
+            {
+                break;
+            }
         }
     }
 
@@ -411,35 +418,34 @@ void parse_util_token_extent(const wchar_t *buff,
                              const wchar_t **prev_begin,
                              const wchar_t **prev_end)
 {
-    const wchar_t *begin, *end;
-    long pos;
-
     const wchar_t *a = NULL, *b = NULL, *pa = NULL, *pb = NULL;
 
     CHECK(buff,);
 
     assert(cursor_pos >= 0);
 
-    parse_util_cmdsubst_extent(buff, cursor_pos, &begin, &end);
+    const wchar_t *cmdsubst_begin, *cmdsubst_end;
+    parse_util_cmdsubst_extent(buff, cursor_pos, &cmdsubst_begin, &cmdsubst_end);
 
-    if (!end || !begin)
+    if (!cmdsubst_end || !cmdsubst_begin)
     {
         return;
     }
 
-    pos = cursor_pos - (begin - buff);
+    /* pos is equivalent to cursor_pos within the range of the command substitution {begin, end} */
+    long offset_within_cmdsubst = cursor_pos - (cmdsubst_begin - buff);
 
-    a = buff + pos;
+    a = cmdsubst_begin + offset_within_cmdsubst;
     b = a;
-    pa = buff + pos;
+    pa = cmdsubst_begin + offset_within_cmdsubst;
     pb = pa;
 
-    assert(begin >= buff);
-    assert(begin <= (buff+wcslen(buff)));
-    assert(end >= begin);
-    assert(end <= (buff+wcslen(buff)));
+    assert(cmdsubst_begin >= buff);
+    assert(cmdsubst_begin <= (buff+wcslen(buff)));
+    assert(cmdsubst_end >= cmdsubst_begin);
+    assert(cmdsubst_end <= (buff+wcslen(buff)));
 
-    const wcstring buffcpy = wcstring(begin, end-begin);
+    const wcstring buffcpy = wcstring(cmdsubst_begin, cmdsubst_end-cmdsubst_begin);
 
     tokenizer_t tok(buffcpy.c_str(), TOK_ACCEPT_UNFINISHED | TOK_SQUASH_ERRORS);
     for (; tok_has_next(&tok); tok_next(&tok))
@@ -460,9 +466,9 @@ void parse_util_token_extent(const wchar_t *buff,
           cursor is between two tokens, so we set it to a zero element
           string and break
         */
-        if (tok_begin > pos)
+        if (tok_begin > offset_within_cmdsubst)
         {
-            a = b = (wchar_t *)buff + pos;
+            a = b = cmdsubst_begin + offset_within_cmdsubst;
             break;
         }
 
@@ -470,9 +476,9 @@ void parse_util_token_extent(const wchar_t *buff,
           If cursor is inside the token, this is the token we are
           looking for. If so, set a and b and break
         */
-        if ((tok_last_type(&tok) == TOK_STRING) && (tok_end >= pos))
+        if ((tok_last_type(&tok) == TOK_STRING) && (tok_end >= offset_within_cmdsubst))
         {
-            a = begin + tok_get_pos(&tok);
+            a = cmdsubst_begin + tok_get_pos(&tok);
             b = a + wcslen(tok_last(&tok));
             break;
         }
@@ -482,7 +488,7 @@ void parse_util_token_extent(const wchar_t *buff,
         */
         if (tok_last_type(&tok) == TOK_STRING)
         {
-            pa = begin + tok_get_pos(&tok);
+            pa = cmdsubst_begin + tok_get_pos(&tok);
             pb = pa + wcslen(tok_last(&tok));
         }
     }

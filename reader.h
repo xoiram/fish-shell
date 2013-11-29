@@ -46,6 +46,9 @@ void reader_init();
 */
 void reader_destroy();
 
+/** Restore the term mode at startup */
+void restore_term_mode();
+
 /**
    Returns the filename of the file currently read
 */
@@ -215,11 +218,6 @@ void reader_set_exit_on_interrupt(bool flag);
    Returns true if the shell is exiting, 0 otherwise.
 */
 int exit_status();
-
-/**
-   Replace the current token with the specified string
-*/
-void reader_replace_current_token(const wchar_t *new_token);
 
 /**
    The readers interrupt signal handler. Cancels all currently running blocks.

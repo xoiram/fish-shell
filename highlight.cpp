@@ -710,7 +710,7 @@ static bool autosuggest_parse_command(const wcstring &str, wcstring *out_command
                 {
                     /* Command. First check that the command actually exists. */
                     wcstring local_cmd = tok_last(&tok);
-                    bool expanded = expand_one(cmd, EXPAND_SKIP_CMDSUBST | EXPAND_SKIP_VARIABLES);
+                    bool expanded = expand_one(cmd, EXPAND_SKIP_CMDSUBST | EXPAND_SKIP_VARIABLES | EXPAND_SKIP_JOBS);
                     if (! expanded || has_expand_reserved(cmd.c_str()))
                     {
                         /* We can't expand this cmd, ignore it */
@@ -826,8 +826,8 @@ bool autosuggest_suggest_special(const wcstring &str, const wcstring &working_di
         outSuggestion.clear();
 
         /* Unescape the parameter */
-        wcstring unescaped_dir = escaped_dir;
-        bool unescaped = unescape_string(unescaped_dir, UNESCAPE_INCOMPLETE);
+        wcstring unescaped_dir;
+        bool unescaped = unescape_string(escaped_dir, &unescaped_dir, UNESCAPE_INCOMPLETE);
 
         /* Determine the quote type we got from the input directory. */
         wchar_t quote = L'\0';
@@ -873,7 +873,7 @@ bool autosuggest_validate_from_history(const history_item_t &item, file_detectio
     {
         /* We can possibly handle this specially */
         wcstring dir = parsed_arguments.back();
-        if (expand_one(dir, EXPAND_SKIP_CMDSUBST))
+        if (expand_one(dir, EXPAND_SKIP_CMDSUBST | EXPAND_SKIP_JOBS))
         {
             handled = true;
             bool is_help = string_prefixes_string(dir, L"--help") || string_prefixes_string(dir, L"-h");
@@ -997,7 +997,7 @@ static void tokenize(const wchar_t * const buff, std::vector<int> &color, const 
                     if (cmd == L"cd")
                     {
                         wcstring dir = tok_last(&tok);
-                        if (expand_one(dir, EXPAND_SKIP_CMDSUBST))
+                        if (expand_one(dir, EXPAND_SKIP_CMDSUBST | EXPAND_SKIP_JOBS))
                         {
                             int is_help = string_prefixes_string(dir, L"--help") || string_prefixes_string(dir, L"-h");
                             if (!is_help && ! is_potential_cd_path(dir, working_directory, PATH_EXPAND_TILDE, NULL))
@@ -1182,7 +1182,7 @@ static void tokenize(const wchar_t * const buff, std::vector<int> &color, const 
                     case TOK_STRING:
                     {
                         target_str = tok_last(&tok);
-                        if (expand_one(target_str, EXPAND_SKIP_CMDSUBST))
+                        if (expand_one(target_str, EXPAND_SKIP_CMDSUBST | EXPAND_SKIP_JOBS))
                         {
                             target = target_str.c_str();
                         }
@@ -1404,12 +1404,13 @@ void highlight_shell(const wcstring &buff, std::vector<int> &color, size_t pos, 
         if (tok_begin && tok_end)
         {
             wcstring token(tok_begin, tok_end-tok_begin);
-            const wcstring_list_t working_directory_list(1, working_directory);
-            if (unescape_string(token, 1))
+            if (unescape_string_in_place(&token, UNESCAPE_SPECIAL))
             {
                 /* Big hack: is_potential_path expects a tilde, but unescape_string gives us HOME_DIRECTORY. Put it back. */
                 if (! token.empty() && token.at(0) == HOME_DIRECTORY)
                     token.at(0) = L'~';
+
+                const wcstring_list_t working_directory_list(1, working_directory);
                 if (is_potential_path(token, working_directory_list, PATH_EXPAND_TILDE))
                 {
                     for (ptrdiff_t i=tok_begin-cbuff; i < (tok_end-cbuff); i++)

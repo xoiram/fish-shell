@@ -1,9 +1,12 @@
 /** \mainpage Fish user documentation
 
-\section toc Table of contents
-
-- <a href="index.html" name="toc-index">Fish user documentation</a>
+\htmlonly <div class="fish_left_bar"> \endhtmlonly
 @toc@
+\htmlonly </div> \endhtmlonly
+
+\htmlonly
+<div class="fish_right_bar">
+\endhtmlonly
 
 \section introduction Introduction
 
@@ -376,6 +379,20 @@ Help on a specific builtin can also be obtained with the <code>-h</code>
 parameter. For instance, to obtain help on the \c fg builtin, either
 type <code>fg -h</code> or <code>help fg</code>.
 
+\section autosuggestions Autosuggestions
+
+fish suggests commands as you type, based on command history, completions,
+and valid file paths. As you type commands, you will see a completion offered after the
+cursor, in a muted gray color (which can be changed with the
+<code>fish_color_autosuggestion</code> variable).
+
+To accept the autosuggestion (replacing the command line contents),
+hit right arrow or Control-F. If the autosuggestion is not what you want,
+just ignore it: it won't execute unless you accept it.
+
+Autosuggestions are a powerful way to quickly summon frequently entered commands, by
+typing the first few characters. They are also an efficient technique for navigating
+through directory hierarchies.
 
 \section completion Tab completion
 
@@ -1120,6 +1137,9 @@ Here are some of the commands available in the editor:
 - Alt-W prints a short description of the command under the cursor.
 - Alt-L lists the contents of the current directory, unless the cursor is over a directory argument, in which case the contents of that directory will be listed.
 - Alt-P adds the string <code>'| less;'</code> to the end of the job under the cursor. The result is that the output of the command will be paged.
+- Alt-C capitalizes the current word.
+- Alt-U makes the current word uppercase.
+- F1 shows the manual page for the current command, if one exists.
 
 You can change these key bindings using the
 <a href="commands.html#bind">bind</a> builtin command.
@@ -1361,3 +1381,5 @@ If you have an improvement for fish, you can submit it via the mailing list
 or the GitHub page.
 
 */
+
+\htmlonly </div> \endhtmlonly

@@ -152,9 +152,9 @@ The fish parser. Contains functions for parsing and evaluating code.
 #define INVALID_END_ERR_MSG _( L"'end' command outside of block")
 
 /**
-   Error message for Posix-style assignment
+   Error message for Posix-style assignment: foo=bar
 */
-#define COMMAND_ASSIGN_ERR_MSG _( L"Unknown command '%ls'. Did you mean 'set %ls %ls'? For information on assigning values to variables, see the help section on the set command by typing 'help set'.")
+#define COMMAND_ASSIGN_ERR_MSG _( L"Unknown command '%ls'. Did you mean 'set %ls %ls'? See the help section on the set command by typing 'help set'.")
 
 /**
    Error for invalid redirection token
@@ -2012,7 +2012,6 @@ int parser_t::parse_job(process_t *p,
                 if (! has_command && ! use_implicit_cd)
                 {
 
-                    int tmp;
                     const wchar_t *cmd = args.at(0).completion.c_str();
 
                     /*
@@ -2033,19 +2032,39 @@ int parser_t::parse_job(process_t *p,
                      and zsh).
                      */
 
-                    if (wcschr(cmd, L'='))
+                    const wchar_t * const equals_ptr = wcschr(cmd, L'=');
+                    if (equals_ptr != NULL)
                     {
-                        wchar_t *cpy = wcsdup(cmd);
-                        wchar_t *valpart = wcschr(cpy, L'=');
-                        *valpart++=0;
+                        /* Try to figure out if this is a pure variable assignment (foo=bar), or if this appears to be running a command (foo=bar ruby...) */
 
-                        debug(0,
-                              COMMAND_ASSIGN_ERR_MSG,
-                              cmd,
-                              cpy,
-                              valpart);
-                        free(cpy);
+                        const wcstring name_str = wcstring(cmd, equals_ptr - cmd); //variable name, up to the =
+                        const wcstring val_str = wcstring(equals_ptr + 1); //variable value, past the =
 
+                        wcstring next_str;
+                        if (tok_peek_next(tok, &next_str) == TOK_STRING && ! next_str.empty())
+                        {
+                            wcstring ellipsis_str = wcstring(1, ellipsis_char);
+                            if (ellipsis_str == L"$")
+                                ellipsis_str = L"...";
+
+                            /* Looks like a command */
+                            debug(0,
+                                  _(L"Unknown command '%ls'. Did you mean to run %ls with a modified environment? Try 'env %ls=%ls %ls%ls'. See the help section on the set command by typing 'help set'."),
+                                  cmd,
+                                  next_str.c_str(),
+                                  name_str.c_str(),
+                                  val_str.c_str(),
+                                  next_str.c_str(),
+                                  ellipsis_str.c_str());
+                        }
+                        else
+                        {
+                            debug(0,
+                                  COMMAND_ASSIGN_ERR_MSG,
+                                  cmd,
+                                  name_str.c_str(),
+                                  val_str.c_str());
+                        }
                     }
                     else if (cmd[0]==L'$' || cmd[0] == VARIABLE_EXPAND || cmd[0] == VARIABLE_EXPAND_SINGLE)
                     {
@@ -2055,15 +2074,17 @@ int parser_t::parse_job(process_t *p,
                         if (val)
                         {
                             debug(0,
-                                  _(L"Variables may not be used as commands. Instead, define a function like 'function %ls; %ls $argv; end'. See the help section for the function command by typing 'help function'."),
+                                  _(L"Variables may not be used as commands. Instead, define a function like 'function %ls; %ls $argv; end' or use the eval builtin instead, like 'eval %ls'. See the help section for the function command by typing 'help function'."),
                                   cmd+1,
                                   val,
+                                  cmd,
                                   cmd);
                         }
                         else
                         {
                             debug(0,
-                                  _(L"Variables may not be used as commands. Instead, define a function. See the help section for the function command by typing 'help function'."),
+                                  _(L"Variables may not be used as commands. Instead, define a function or use the eval builtin instead, like 'eval %ls'. See the help section for the function command by typing 'help function'."),
+                                  cmd,
                                   cmd);
                         }
                     }
@@ -2093,7 +2114,7 @@ int parser_t::parse_job(process_t *p,
                         event_fire_generic(L"fish_command_not_found", &event_args);
                     }
 
-                    tmp = current_tokenizer_pos;
+                    int tmp = current_tokenizer_pos;
                     current_tokenizer_pos = tok_get_pos(tok);
 
                     fwprintf(stderr, L"%ls", parser_t::current_line());
@@ -2707,8 +2728,6 @@ const wchar_t *parser_get_block_command(int type)
 */
 int parser_t::parser_test_argument(const wchar_t *arg, wcstring *out, const wchar_t *prefix, int offset)
 {
-    wchar_t *unesc;
-    wchar_t *pos;
     int err=0;
 
     wchar_t *paran_begin, *paran_end;
@@ -2770,8 +2789,8 @@ int parser_t::parser_test_argument(const wchar_t *arg, wcstring *out, const wcha
         }
     }
 
-    unesc = unescape(arg_cpy, 1);
-    if (!unesc)
+    wcstring unesc;
+    if (! unescape_string(arg_cpy, &unesc, UNESCAPE_SPECIAL))
     {
         if (out)
         {
@@ -2784,26 +2803,25 @@ int parser_t::parser_test_argument(const wchar_t *arg, wcstring *out, const wcha
     }
     else
     {
-        /*
-          Check for invalid variable expansions
-        */
-        for (pos = unesc; *pos; pos++)
+        /* Check for invalid variable expansions */
+        const size_t unesc_size = unesc.size();
+        for (size_t idx = 0; idx < unesc_size; idx++)
         {
-            switch (*pos)
+            switch (unesc.at(idx))
             {
                 case VARIABLE_EXPAND:
                 case VARIABLE_EXPAND_SINGLE:
                 {
-                    wchar_t n = *(pos+1);
+                    wchar_t next_char = (idx + 1 < unesc_size ? unesc.at(idx + 1) : L'\0');
 
-                    if (n != VARIABLE_EXPAND &&
-                            n != VARIABLE_EXPAND_SINGLE &&
-                            !wcsvarchr(n))
+                    if (next_char != VARIABLE_EXPAND &&
+                            next_char != VARIABLE_EXPAND_SINGLE &&
+                            ! wcsvarchr(next_char))
                     {
                         err=1;
                         if (out)
                         {
-                            expand_variable_error(*this, unesc, pos-unesc, offset);
+                            expand_variable_error(*this, unesc, idx, offset);
                             print_errors(*out, prefix);
                         }
                     }
@@ -2816,7 +2834,6 @@ int parser_t::parser_test_argument(const wchar_t *arg, wcstring *out, const wcha
 
     free(arg_cpy);
 
-    free(unesc);
     return err;
 
 }
@@ -3533,8 +3550,8 @@ int parser_t::test(const wchar_t *buff, int *block_level, wcstring *out, const w
                 }
                 else
                 {
-                    err = 1;
-                    if (out)
+                    // Only print errors once
+                    if (out && ! err)
                     {
                         error(SYNTAX_ERROR,
                               tok_get_pos(&tok),
@@ -3544,6 +3561,7 @@ int parser_t::test(const wchar_t *buff, int *block_level, wcstring *out, const w
 
                         print_errors(*out, prefix);
                     }
+                    err = 1;
                 }
 
                 break;

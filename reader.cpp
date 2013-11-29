@@ -392,11 +392,12 @@ static volatile int interrupted=0;
 static bool is_backslashed(const wcstring &str, size_t pos);
 static wchar_t unescaped_quote(const wcstring &str, size_t pos);
 
-/**
-   Stores the previous termios mode so we can reset the modes when
-   we execute programs and when the shell exits.
-*/
-static struct termios saved_modes;
+/** Mode on startup, which we restore on exit */
+static struct termios terminal_mode_on_startup;
+
+/** Mode we use to execute programs */
+static struct termios terminal_mode_for_executing_programs;
+
 
 static void reader_super_highlight_me_plenty(size_t pos);
 
@@ -415,7 +416,7 @@ static void term_donate()
 
     while (1)
     {
-        if (tcsetattr(0,TCSANOW,&saved_modes))
+        if (tcsetattr(0, TCSANOW, &terminal_mode_for_executing_programs))
         {
             if (errno != EINTR)
             {
@@ -802,8 +803,8 @@ bool reader_data_t::expand_abbreviation_as_necessary(size_t cursor_backtrack)
 /** Sorts and remove any duplicate completions in the list. */
 static void sort_and_make_unique(std::vector<completion_t> &l)
 {
-    sort(l.begin(), l.end());
-    l.erase(std::unique(l.begin(), l.end()), l.end());
+    sort(l.begin(), l.end(), completion_t::is_alphabetically_less_than);
+    l.erase(std::unique(l.begin(), l.end(), completion_t::is_alphabetically_equal_to), l.end());
 }
 
 
@@ -962,31 +963,48 @@ void reader_init()
 {
     VOMIT_ON_FAILURE(pthread_key_create(&generation_count_key, NULL));
 
-    tcgetattr(0,&shell_modes);        /* get the current terminal modes */
-    memcpy(&saved_modes,
-           &shell_modes,
-           sizeof(saved_modes));     /* save a copy so we can reset the terminal later */
+    /* Save the initial terminal mode */
+    tcgetattr(STDIN_FILENO, &terminal_mode_on_startup);
 
+    /* Set the mode used for program execution, initialized to the current mode */
+    memcpy(&terminal_mode_for_executing_programs, &terminal_mode_on_startup, sizeof terminal_mode_for_executing_programs);
+    terminal_mode_for_executing_programs.c_iflag &= ~IXON;     /* disable flow control */
+    terminal_mode_for_executing_programs.c_iflag &= ~IXOFF;    /* disable flow control */
+
+    /* Set the mode used for the terminal, initialized to the current mode */
+    memcpy(&shell_modes, &terminal_mode_on_startup, sizeof shell_modes);
     shell_modes.c_lflag &= ~ICANON;   /* turn off canonical mode */
     shell_modes.c_lflag &= ~ECHO;     /* turn off echo mode */
+    shell_modes.c_iflag &= ~IXON;     /* disable flow control */
+    shell_modes.c_iflag &= ~IXOFF;    /* disable flow control */
     shell_modes.c_cc[VMIN]=1;
     shell_modes.c_cc[VTIME]=0;
 
+#if defined(_POSIX_VDISABLE)
     // PCA disable VDSUSP (typically control-Y), which is a funny job control
     // function available only on OS X and BSD systems
     // This lets us use control-Y for yank instead
 #ifdef VDSUSP
     shell_modes.c_cc[VDSUSP] = _POSIX_VDISABLE;
 #endif
+#endif
 }
 
 
 void reader_destroy()
 {
-    tcsetattr(0, TCSANOW, &saved_modes);
     pthread_key_delete(generation_count_key);
 }
 
+void restore_term_mode()
+{
+    // Restore the term mode if we own the terminal
+    // It's important we do this before restore_foreground_process_group, otherwise we won't think we own the terminal
+    if (getpid() == tcgetpgrp(STDIN_FILENO))
+    {
+        tcsetattr(STDIN_FILENO, TCSANOW, &terminal_mode_on_startup);
+    }
+}
 
 void reader_exit(int do_exit, int forced)
 {
@@ -1642,11 +1660,14 @@ static bool reader_can_replace(const wcstring &in, int flags)
 /* Compare two completions, ordering completions with better match types first */
 bool compare_completions_by_match_type(const completion_t &a, const completion_t &b)
 {
-    /* Compare match types */
-    int match_compare = a.match.compare(b.match);
-    if (match_compare != 0)
+    /* Compare match types, unless both completions are prefix (#923) in which case we always want to compare them alphabetically */
+    if (a.match.type != fuzzy_match_prefix || b.match.type != fuzzy_match_prefix)
     {
-        return match_compare < 0;
+        int match_compare = a.match.compare(b.match);
+        if (match_compare != 0)
+        {
+            return match_compare < 0;
+        }
     }
 
     /* Compare using file comparison */
@@ -1699,17 +1720,16 @@ static const completion_t *cycle_competions(const std::vector<completion_t> &com
     if (size == 0)
         return NULL;
 
+    // note start_idx will be set to -1 initially, so that when it gets incremented we start at 0
     const size_t start_idx = *inout_idx;
     size_t idx = start_idx;
+
     const completion_t *result = NULL;
-    for (;;)
+    size_t remaining = comp.size();
+    while (remaining--)
     {
         /* Bump the index */
         idx = (idx + 1) % size;
-
-        /* Bail if we've looped */
-        if (idx == start_idx)
-            break;
 
         /* Get the completion */
         const completion_t &c = comp.at(idx);
@@ -2160,7 +2180,7 @@ static void set_command_line_and_position(const wcstring &new_str, size_t pos)
     reader_repaint();
 }
 
-void reader_replace_current_token(const wchar_t *new_token)
+static void reader_replace_current_token(const wchar_t *new_token)
 {
 
     const wchar_t *begin, *end;
@@ -2168,7 +2188,7 @@ void reader_replace_current_token(const wchar_t *new_token)
 
     /* Find current token */
     const wchar_t *buff = data->command_line.c_str();
-    parse_util_token_extent((wchar_t *)buff, data->buff_pos, &begin, &end, 0, 0);
+    parse_util_token_extent(buff, data->buff_pos, &begin, &end, 0, 0);
 
     if (!begin || !end)
         return;
@@ -2319,6 +2339,13 @@ static void handle_token_history(int forward, int reset)
 
                         }
                     }
+                    break;
+
+                    default:
+                    {
+                        break;
+                    }
+
                 }
             }
         }
@@ -2819,7 +2846,7 @@ int exit_status()
 static void handle_end_loop()
 {
     job_t *j;
-    int job_count=0;
+    int stopped_jobs_count=0;
     int is_breakpoint=0;
     block_t *b;
     parser_t &parser = parser_t::principal_parser();
@@ -2838,14 +2865,14 @@ static void handle_end_loop()
     job_iterator_t jobs;
     while ((j = jobs.next()))
     {
-        if (!job_is_completed(j))
+        if (!job_is_completed(j) && (job_is_stopped(j)))
         {
-            job_count++;
+            stopped_jobs_count++;
             break;
         }
     }
 
-    if (!reader_exit_forced() && !data->prev_end_loop && job_count && !is_breakpoint)
+    if (!reader_exit_forced() && !data->prev_end_loop && stopped_jobs_count && !is_breakpoint)
     {
         writestr(_(L"There are stopped jobs. A second attempt to exit will enforce their termination.\n"));
 
@@ -3023,7 +3050,7 @@ const wchar_t *reader_readline(void)
 
     /* The command line before completion */
     wcstring cycle_command_line;
-    size_t cycle_cursor_pos;
+    size_t cycle_cursor_pos = 0;
 
     data->search_buff.clear();
     data->search_mode = NO_SEARCH;
@@ -3788,6 +3815,42 @@ const wchar_t *reader_readline(void)
                     /* Put cursor right after the second token */
                     set_command_line_and_position(new_buff, tok_end - buff);
                 }
+                break;
+            }
+
+            case R_UPCASE_WORD:
+            case R_DOWNCASE_WORD:
+            case R_CAPITALIZE_WORD:
+            {
+                // For capitalize_word, whether we've capitalized a character so far
+                bool capitalized_first = false;
+
+                // We apply the operation from the current location to the end of the word
+                size_t pos = data->buff_pos;
+                move_word(MOVE_DIR_RIGHT, false, move_word_style_punctuation, false);
+                for (; pos < data->buff_pos; pos++)
+                {
+                    wchar_t chr = data->command_line.at(pos);
+
+                    // We always change the case; this decides whether we go uppercase (true) or lowercase (false)
+                    bool make_uppercase;
+                    if (c == R_CAPITALIZE_WORD)
+                        make_uppercase = ! capitalized_first && iswalnum(chr);
+                    else
+                        make_uppercase = (c == R_UPCASE_WORD);
+
+                    // Apply the operation and then record what we did
+                    if (make_uppercase)
+                        chr = towupper(chr);
+                    else
+                        chr = towlower(chr);
+
+                    data->command_line.at(pos) = chr;
+                    capitalized_first = capitalized_first || make_uppercase;
+                }
+                data->command_line_changed();
+                reader_super_highlight_me_plenty(data->buff_pos);
+                reader_repaint();
                 break;
             }
 

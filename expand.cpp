@@ -585,7 +585,30 @@ static int find_process(const wchar_t *proc,
         ASSERT_IS_MAIN_THREAD();
         const job_t *j;
 
-        if (iswnumeric(proc) || (wcslen(proc)==0))
+        // do the empty param check first, because an empty string passes our 'numeric' check
+        if (wcslen(proc)==0)
+        {
+            /*
+              This is an empty job expansion: '%'
+              It expands to the last job backgrounded.
+            */
+            job_iterator_t jobs;
+            while ((j = jobs.next()))
+            {
+                if (!j->command_is_empty())
+                {
+                    append_completion(out, to_string<long>(j->pgid));
+                    break;
+                }
+            }
+            /*
+              You don't *really* want to flip a coin between killing
+              the last process backgrounded and all processes, do you?
+              Let's not try other match methods with the solo '%' syntax.
+            */
+            found = 1;
+        }
+        else if (iswnumeric(proc))
         {
             /*
               This is a numeric job string, like '%2'
@@ -611,11 +634,9 @@ static int find_process(const wchar_t *proc,
                                           0);
                     }
                 }
-
             }
             else
             {
-
                 int jid;
                 wchar_t *end;
 
@@ -624,15 +645,17 @@ static int find_process(const wchar_t *proc,
                 if (jid > 0 && !errno && !*end)
                 {
                     j = job_get(jid);
-                    if ((j != 0) && (j->command_wcstr() != 0))
+                    if ((j != 0) && (j->command_wcstr() != 0) && (!j->command_is_empty()))
                     {
-                        {
-                            append_completion(out, to_string<long>(j->pgid));
-                            found = 1;
-                        }
+                        append_completion(out, to_string<long>(j->pgid));
                     }
                 }
             }
+            /*
+               Stop here so you can't match a random process name
+               when you're just trying to use job control.
+            */
+            found = 1;
         }
         if (found)
             return 1;
@@ -805,7 +828,7 @@ static int expand_pid(const wcstring &instr_with_sep,
 }
 
 
-void expand_variable_error(parser_t &parser, const wchar_t *token, size_t token_pos, int error_pos)
+void expand_variable_error(parser_t &parser, const wcstring &token, size_t token_pos, int error_pos)
 {
     size_t stop_pos = token_pos+1;
 
@@ -813,7 +836,7 @@ void expand_variable_error(parser_t &parser, const wchar_t *token, size_t token_
     {
         case BRACKET_BEGIN:
         {
-            wchar_t *cpy = wcsdup(token);
+            wchar_t *cpy = wcsdup(token.c_str());
             *(cpy+token_pos)=0;
             wchar_t *name = &cpy[stop_pos+1];
             wchar_t *end = wcschr(name, BRACKET_END);
@@ -1442,26 +1465,6 @@ static int expand_cmdsubst(parser_t &parser, const wcstring &input, std::vector<
     return 1;
 }
 
-/**
-   Wrapper around unescape funtion. Issues an error() on failiure.
-*/
-__attribute__((unused))
-static wchar_t *expand_unescape(parser_t &parser, const wchar_t * in, int escape_special)
-{
-    wchar_t *res = unescape(in, escape_special);
-    if (!res)
-        parser.error(SYNTAX_ERROR, -1, L"Unexpected end of string");
-    return res;
-}
-
-static wcstring expand_unescape_string(const wcstring &in, int escape_special)
-{
-    wcstring tmp = in;
-    unescape_string(tmp, escape_special);
-    /* Need to detect error here */
-    return tmp;
-}
-
 /* Given that input[0] is HOME_DIRECTORY or tilde (ugh), return the user's name. Return the empty string if it is just a tilde. Also return by reference the index of the first character of the remaining part of the string (e.g. the subsequent slash) */
 static wcstring get_home_directory_name(const wcstring &input, size_t *out_tail_idx)
 {
@@ -1646,8 +1649,8 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
          expand_string to expand incomplete strings from the
          commandline.
          */
-        int unescape_flags = UNESCAPE_SPECIAL | UNESCAPE_INCOMPLETE;
-        wcstring next = expand_unescape_string(in->at(i).completion, unescape_flags);
+        wcstring next;
+        unescape_string(in->at(i).completion, &next, UNESCAPE_SPECIAL | UNESCAPE_INCOMPLETE);
 
         if (EXPAND_SKIP_VARIABLES & flags)
         {
@@ -1730,8 +1733,14 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
         remove_internal_separator(next_str, (EXPAND_SKIP_WILDCARDS & flags) ? true : false);
         const wchar_t *next = next_str.c_str();
 
-        if (((flags & ACCEPT_INCOMPLETE) && (!(flags & EXPAND_SKIP_WILDCARDS))) ||
-                wildcard_has(next, 1))
+        const bool has_wildcard = wildcard_has(next, 1);
+
+        if (has_wildcard && (flags & EXECUTABLES_ONLY))
+        {
+            // Don't do wildcard expansion for executables. See #785. So do nothing here.
+        }
+        else if (((flags & ACCEPT_INCOMPLETE) && (!(flags & EXPAND_SKIP_WILDCARDS))) ||
+                 has_wildcard)
         {
             const wchar_t *start, *rest;
 
@@ -1766,7 +1775,7 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
                     case 1:
                     {
                         res = EXPAND_WILDCARD_MATCH;
-                        sort_completions(expanded);
+                        std::sort(expanded.begin(), expanded.end(), completion_t::is_alphabetically_less_than);
                         out->insert(out->end(), expanded.begin(), expanded.end());
                         break;
                     }

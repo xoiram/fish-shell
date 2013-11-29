@@ -10,17 +10,12 @@ __fish_complete_ssh scp
 
 complete -c scp -d Hostname -a "
 
-(
-	#Find a suitable hostname from the knownhosts files
-	cat ~/.ssh/known_hosts{,2} ^/dev/null|cut -d ' ' -f 1| cut -d , -f 1
-):
+(__fish_print_hostnames):
 
 (
 	#Prepend any username specified in the completion to the hostname
 	commandline -ct |sed -ne 's/\(.*@\).*/\1/p'
-)(
-	cat ~/.ssh/known_hosts{,2} ^/dev/null|cut -d ' ' -f 1| cut -d , -f 1
-):
+)(__fish_print_hostnames):
 
 (__fish_print_users)@\tUsername
 
@@ -36,7 +31,7 @@ complete -c scp -d "Remote Path" -n "commandline -ct|sgrep -o '.*:'" -a "
 	commandline -ct|sgrep -o '.*:'
 )(
 	#Get the list of remote files from the specified ssh server
-        ssh -o \"BatchMode yes\" (commandline -ct|sed -ne 's/\(.*\):.*/\1/p') ls\ -dp\ (commandline -ct|sed -ne 's/.*://p')\* 2> /dev/null
+        ssh (commandline -c|sgrep -o '\-P [0-9]*'|tr P p) -o \"BatchMode yes\" (commandline -ct|sed -ne 's/\(.*\):.*/\1/p') ls\ -dp\ (commandline -ct|sed -ne 's/.*://p')\* 2> /dev/null
 )
 
 "
