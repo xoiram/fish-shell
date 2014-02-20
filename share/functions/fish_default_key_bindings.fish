@@ -89,6 +89,9 @@ function fish_default_key_bindings -d "Default (Emacs-like) key bindings for fis
 	bind \e\[1\;9B history-token-search-forward # iTerm2
 	bind \e\[1\;9C forward-word #iTerm2
 	bind \e\[1\;9D backward-word #iTerm2
+	# Bash compatibility
+	# https://github.com/fish-shell/fish-shell/issues/89
+	bind \e. history-token-search-backward
 	bind \ed forward-kill-word
 	bind -k ppage beginning-of-history
 	bind -k npage end-of-history
@@ -111,6 +114,12 @@ function fish_default_key_bindings -d "Default (Emacs-like) key bindings for fis
 	# This will make sure the output of the current command is paged using the less pager when you press Meta-p
 	bind \ep '__fish_paginate'
 	
+	# shift-tab does a tab complete followed by a search
+	bind --key btab complete-and-search
+
+	# escape cancels stuff	
+	bind \e cancel
+
 	# term-specific special bindings
 	switch "$TERM"
 		case 'rxvt*'
@@ -119,3 +128,4 @@ function fish_default_key_bindings -d "Default (Emacs-like) key bindings for fis
 			bind \eOd backward-word
 	end
 end
+

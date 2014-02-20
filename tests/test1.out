@@ -23,6 +23,7 @@ errput
 output
 errput
 output
+is_stdout
 abc\ndef
 abc
 def
@@ -35,3 +36,4 @@ abc
 Catch your breath
 abc!def
 abc!1def
+1

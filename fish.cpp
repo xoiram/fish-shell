@@ -12,7 +12,7 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 */
 
 
@@ -72,6 +72,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
    The string describing the single-character options accepted by the main fish binary
 */
 #define GETOPT_STRING "+hilnvc:p:d:"
+
+/* If we are doing profiling, the filename to output to */
+static const char *s_profiling_output_filename = NULL;
 
 static bool has_suffix(const std::string &path, const char *suffix, bool ignore_case)
 {
@@ -182,16 +185,21 @@ static struct config_paths_t determine_config_directory_paths(const char *argv0)
             {
                 wcstring base_path = str2wcstring(exec_path);
                 base_path.resize(base_path.size() - strlen(suffix));
-
+                
                 paths.data = base_path + L"/share/fish";
                 paths.sysconf = base_path + L"/etc/fish";
                 paths.doc = base_path + L"/share/doc/fish";
                 paths.bin = base_path + L"/bin";
-
+                
+                /* Check only that the data and sysconf directories exist. Handle the doc directories separately */
                 struct stat buf;
-                if (0 == wstat(paths.data, &buf) && 0 == wstat(paths.sysconf, &buf) &&
-                        0 == wstat(paths.doc, &buf))
+                if (0 == wstat(paths.data, &buf) && 0 == wstat(paths.sysconf, &buf))
                 {
+                    /* The docs dir may not exist; in that case fall back to the compiled in path */
+                    if (0 != wstat(paths.doc, &buf))
+                    {
+                        paths.doc = L"" DOCDIR;
+                    }
                     done = true;
                 }
             }
@@ -239,7 +247,6 @@ static int read_init(const struct config_paths_t &paths)
 
     return 1;
 }
-
 
 /**
   Parse the argument list, return the index of the first non-switch
@@ -341,7 +348,8 @@ static int fish_parse_opt(int argc, char **argv, std::vector<std::string> *out_c
 
             case 'p':
             {
-                profile = optarg;
+                s_profiling_output_filename = optarg;
+                g_profiling_active = true;
                 break;
             }
 
@@ -516,11 +524,16 @@ int main(int argc, char **argv)
 
     restore_term_mode();
     restore_term_foreground_process_group();
+    
+    if (g_profiling_active)
+    {
+        parser.emit_profiling(s_profiling_output_filename);
+    }
+    
     history_destroy();
     proc_destroy();
     builtin_destroy();
     reader_destroy();
-    parser.destroy();
     wutil_destroy();
     event_destroy();
 

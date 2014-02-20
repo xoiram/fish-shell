@@ -49,6 +49,7 @@ parameter expansion.
 #include "signal.h"
 #include "tokenizer.h"
 #include "complete.h"
+#include "iothread.h"
 
 #include "parse_util.h"
 
@@ -560,6 +561,166 @@ std::vector<wcstring> expand_get_all_process_names(void)
     return result;
 }
 
+/* Helper function to do a job search. */
+struct find_job_data_t
+{
+    const wchar_t *proc; /* The process to search for - possibly numeric, possibly a name */
+    expand_flags_t flags;
+    std::vector<completion_t> *completions;
+};
+
+/* The following function is invoked on the main thread, because the job list is not thread safe. It should search the job list for something matching the given proc, and then return 1 to stop the search, 0 to continue it  */
+static int find_job(const struct find_job_data_t *info)
+{
+    ASSERT_IS_MAIN_THREAD();
+
+    const wchar_t * const proc = info->proc;
+    const expand_flags_t flags = info->flags;
+    std::vector<completion_t> &completions = *info->completions;
+
+    const job_t *j;
+    int found = 0;
+    // do the empty param check first, because an empty string passes our 'numeric' check
+    if (wcslen(proc)==0)
+    {
+        /*
+          This is an empty job expansion: '%'
+          It expands to the last job backgrounded.
+        */
+        job_iterator_t jobs;
+        while ((j = jobs.next()))
+        {
+            if (!j->command_is_empty())
+            {
+                append_completion(completions, to_string<long>(j->pgid));
+                break;
+            }
+        }
+        /*
+          You don't *really* want to flip a coin between killing
+          the last process backgrounded and all processes, do you?
+          Let's not try other match methods with the solo '%' syntax.
+        */
+        found = 1;
+    }
+    else if (iswnumeric(proc))
+    {
+        /*
+          This is a numeric job string, like '%2'
+        */
+
+        if (flags & ACCEPT_INCOMPLETE)
+        {
+            job_iterator_t jobs;
+            while ((j = jobs.next()))
+            {
+                wchar_t jid[16];
+                if (j->command_is_empty())
+                    continue;
+
+                swprintf(jid, 16, L"%d", j->job_id);
+
+                if (wcsncmp(proc, jid, wcslen(proc))==0)
+                {
+                    wcstring desc_buff = format_string(COMPLETE_JOB_DESC_VAL, j->command_wcstr());
+                    append_completion(completions,
+                                      jid+wcslen(proc),
+                                      desc_buff,
+                                      0);
+                }
+            }
+        }
+        else
+        {
+            int jid;
+            wchar_t *end;
+
+            errno = 0;
+            jid = fish_wcstoi(proc, &end, 10);
+            if (jid > 0 && !errno && !*end)
+            {
+                j = job_get(jid);
+                if ((j != 0) && (j->command_wcstr() != 0) && (!j->command_is_empty()))
+                {
+                    append_completion(completions, to_string<long>(j->pgid));
+                }
+            }
+        }
+        /*
+           Stop here so you can't match a random process name
+           when you're just trying to use job control.
+        */
+        found = 1;
+    }
+
+    if (! found)
+    {
+        job_iterator_t jobs;
+        while ((j = jobs.next()))
+        {
+
+            if (j->command_is_empty())
+                continue;
+
+            size_t offset;
+            if (match_pid(j->command(), proc, flags, &offset))
+            {
+                if (flags & ACCEPT_INCOMPLETE)
+                {
+                    append_completion(completions,
+                                      j->command_wcstr() + offset + wcslen(proc),
+                                      COMPLETE_JOB_DESC,
+                                      0);
+                }
+                else
+                {
+                    append_completion(completions, to_string<long>(j->pgid));
+                    found = 1;
+                }
+            }
+        }
+
+        if (! found)
+        {
+            jobs.reset();
+            while ((j = jobs.next()))
+            {
+                process_t *p;
+                if (j->command_is_empty())
+                    continue;
+                for (p=j->first_process; p; p=p->next)
+                {
+                    if (p->actual_cmd.empty())
+                        continue;
+
+                    size_t offset;
+                    if (match_pid(p->actual_cmd, proc, flags, &offset))
+                    {
+                        if (flags & ACCEPT_INCOMPLETE)
+                        {
+                            append_completion(completions,
+                                              wcstring(p->actual_cmd, offset + wcslen(proc)),
+                                              COMPLETE_CHILD_PROCESS_DESC,
+                                              0);
+                        }
+                        else
+                        {
+                            append_completion(completions,
+                                              to_string<long>(p->pid),
+                                              L"",
+                                              0);
+                            found = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return found;
+}
+
+
 /**
    Searches for a job with the specified job id, or a job or process
    which has the string \c proc as a prefix of its commandline.
@@ -582,146 +743,8 @@ static int find_process(const wchar_t *proc,
 
     if (!(flags & EXPAND_SKIP_JOBS))
     {
-        ASSERT_IS_MAIN_THREAD();
-        const job_t *j;
-
-        // do the empty param check first, because an empty string passes our 'numeric' check
-        if (wcslen(proc)==0)
-        {
-            /*
-              This is an empty job expansion: '%'
-              It expands to the last job backgrounded.
-            */
-            job_iterator_t jobs;
-            while ((j = jobs.next()))
-            {
-                if (!j->command_is_empty())
-                {
-                    append_completion(out, to_string<long>(j->pgid));
-                    break;
-                }
-            }
-            /*
-              You don't *really* want to flip a coin between killing
-              the last process backgrounded and all processes, do you?
-              Let's not try other match methods with the solo '%' syntax.
-            */
-            found = 1;
-        }
-        else if (iswnumeric(proc))
-        {
-            /*
-              This is a numeric job string, like '%2'
-            */
-
-            if (flags & ACCEPT_INCOMPLETE)
-            {
-                job_iterator_t jobs;
-                while ((j = jobs.next()))
-                {
-                    wchar_t jid[16];
-                    if (j->command_is_empty())
-                        continue;
-
-                    swprintf(jid, 16, L"%d", j->job_id);
-
-                    if (wcsncmp(proc, jid, wcslen(proc))==0)
-                    {
-                        wcstring desc_buff = format_string(COMPLETE_JOB_DESC_VAL, j->command_wcstr());
-                        append_completion(out,
-                                          jid+wcslen(proc),
-                                          desc_buff,
-                                          0);
-                    }
-                }
-            }
-            else
-            {
-                int jid;
-                wchar_t *end;
-
-                errno = 0;
-                jid = fish_wcstoi(proc, &end, 10);
-                if (jid > 0 && !errno && !*end)
-                {
-                    j = job_get(jid);
-                    if ((j != 0) && (j->command_wcstr() != 0) && (!j->command_is_empty()))
-                    {
-                        append_completion(out, to_string<long>(j->pgid));
-                    }
-                }
-            }
-            /*
-               Stop here so you can't match a random process name
-               when you're just trying to use job control.
-            */
-            found = 1;
-        }
-        if (found)
-            return 1;
-
-        job_iterator_t jobs;
-        while ((j = jobs.next()))
-        {
-
-            if (j->command_is_empty())
-                continue;
-
-            size_t offset;
-            if (match_pid(j->command(), proc, flags, &offset))
-            {
-                if (flags & ACCEPT_INCOMPLETE)
-                {
-                    append_completion(out,
-                                      j->command_wcstr() + offset + wcslen(proc),
-                                      COMPLETE_JOB_DESC,
-                                      0);
-                }
-                else
-                {
-                    append_completion(out, to_string<long>(j->pgid));
-                    found = 1;
-                }
-            }
-        }
-
-        if (found)
-        {
-            return 1;
-        }
-
-        jobs.reset();
-        while ((j = jobs.next()))
-        {
-            process_t *p;
-            if (j->command_is_empty())
-                continue;
-            for (p=j->first_process; p; p=p->next)
-            {
-                if (p->actual_cmd.empty())
-                    continue;
-
-                size_t offset;
-                if (match_pid(p->actual_cmd, proc, flags, &offset))
-                {
-                    if (flags & ACCEPT_INCOMPLETE)
-                    {
-                        append_completion(out,
-                                          wcstring(p->actual_cmd, offset + wcslen(proc)),
-                                          COMPLETE_CHILD_PROCESS_DESC,
-                                          0);
-                    }
-                    else
-                    {
-                        append_completion(out,
-                                          to_string<long>(p->pid),
-                                          L"",
-                                          0);
-                        found = 1;
-                    }
-                }
-            }
-        }
+        const struct find_job_data_t data = {proc, flags, &out};
+        found = iothread_perform_on_main(find_job, &data);
 
         if (found)
         {
@@ -762,6 +785,14 @@ static int expand_pid(const wcstring &instr_with_sep,
                       expand_flags_t flags,
                       std::vector<completion_t> &out)
 {
+    /* Hack. If there's no INTERNAL_SEP and no PROCESS_EXPAND, then there's nothing to do. Check out this "null terminated string." */
+    const wchar_t some_chars[] = {INTERNAL_SEPARATOR, PROCESS_EXPAND, L'\0'};
+    if (instr_with_sep.find_first_of(some_chars) == wcstring::npos)
+    {
+        /* Nothing to do */
+        append_completion(out, instr_with_sep);
+        return 1;
+    }
 
     /* expand_string calls us with internal separators in instr...sigh */
     wcstring instr = instr_with_sep;
@@ -1349,7 +1380,7 @@ static int expand_brackets(parser_t &parser, const wcstring &instr, int flags, s
 /**
  Perform cmdsubst expansion
  */
-static int expand_cmdsubst(parser_t &parser, const wcstring &input, std::vector<completion_t> &outList)
+static int expand_cmdsubst(parser_t &parser, const wcstring &input, std::vector<completion_t> &out_list)
 {
     wchar_t *paran_begin=0, *paran_end=0;
     std::vector<wcstring> sub_res;
@@ -1367,7 +1398,7 @@ static int expand_cmdsubst(parser_t &parser, const wcstring &input, std::vector<
                          L"Mismatched parenthesis");
             return 0;
         case 0:
-            outList.push_back(completion_t(input));
+            append_completion(out_list, input);
             return 1;
         case 1:
 
@@ -1432,15 +1463,15 @@ static int expand_cmdsubst(parser_t &parser, const wcstring &input, std::vector<
        */
     for (i=0; i<sub_res.size(); i++)
     {
-        wcstring sub_item = sub_res.at(i);
-        wcstring sub_item2 = escape_string(sub_item, 1);
+        const wcstring &sub_item = sub_res.at(i);
+        const wcstring sub_item2 = escape_string(sub_item, 1);
+
+        wcstring whole_item;
 
         for (j=0; j < tail_expand.size(); j++)
         {
-
-            wcstring whole_item;
-
-            wcstring tail_item = tail_expand.at(j).completion;
+            whole_item.clear();
+            const wcstring &tail_item = tail_expand.at(j).completion;
 
             //sb_append_substring( &whole_item, in, len1 );
             whole_item.append(in, paran_begin-in);
@@ -1458,7 +1489,7 @@ static int expand_cmdsubst(parser_t &parser, const wcstring &input, std::vector<
             whole_item.append(tail_item);
 
             //al_push( out, whole_item.buff );
-            outList.push_back(completion_t(whole_item));
+            append_completion(out_list, whole_item);
         }
     }
 
@@ -1579,6 +1610,31 @@ static void unexpand_tildes(const wcstring &input, std::vector<completion_t> *co
     }
 }
 
+// If the given path contains the user's home directory, replace that with a tilde
+// We don't try to be smart about case insensitivity, etc.
+wcstring replace_home_directory_with_tilde(const wcstring &str)
+{
+    // only absolute paths get this treatment
+    wcstring result = str;
+    if (string_prefixes_string(L"/", result))
+    {
+        wcstring home_directory = L"~";
+        expand_tilde(home_directory);
+        if (! string_suffixes_string(L"/", home_directory))
+        {
+            home_directory.push_back(L'/');
+        }
+
+        // Now check if the home_directory prefixes the string
+        if (string_prefixes_string(home_directory, result))
+        {
+            // Success
+            result.replace(0, home_directory.size(), L"~/");
+        }
+    }
+    return result;
+}
+
 /**
    Remove any internal separators. Also optionally convert wildcard characters to
    regular equivalents. This is done to support EXPAND_SKIP_WILDCARDS.
@@ -1617,7 +1673,7 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
 
     if ((!(flags & ACCEPT_INCOMPLETE)) && expand_is_clean(input.c_str()))
     {
-        output.push_back(completion_t(input));
+        append_completion(output, input);
         return EXPAND_OK;
     }
 
@@ -1633,7 +1689,7 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
             parser.error(CMDSUBST_ERROR, -1, L"Command substitutions not allowed");
             return EXPAND_ERROR;
         }
-        in->push_back(completion_t(input));
+        append_completion(*in, input);
     }
     else
     {
@@ -1661,7 +1717,7 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
                     next[i] = L'$';
                 }
             }
-            out->push_back(completion_t(next));
+            append_completion(*out, next);
         }
         else
         {
@@ -1677,7 +1733,7 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
 
     for (i=0; i < in->size(); i++)
     {
-        wcstring next = in->at(i).completion;
+        const wcstring &next = in->at(i).completion;
 
         if (!expand_brackets(parser, next, flags, *out))
         {
@@ -1697,7 +1753,7 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
 
         if (flags & ACCEPT_INCOMPLETE)
         {
-            if (next[0] == PROCESS_EXPAND)
+            if (! next.empty() && next.at(0) == PROCESS_EXPAND)
             {
                 /*
                  If process expansion matches, we are not
@@ -1710,7 +1766,7 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
             }
             else
             {
-                out->push_back(completion_t(next));
+                append_completion(*out, next);
             }
         }
         else
@@ -1792,7 +1848,7 @@ int expand_string(const wcstring &input, std::vector<completion_t> &output, expa
         {
             if (!(flags & ACCEPT_INCOMPLETE))
             {
-                out->push_back(completion_t(next_str));
+                append_completion(*out, next_str);
             }
         }
     }
@@ -1819,7 +1875,7 @@ bool expand_one(wcstring &string, expand_flags_t flags)
         return true;
     }
 
-    if (expand_string(string, completions, flags))
+    if (expand_string(string, completions, flags | EXPAND_NO_DESCRIPTIONS))
     {
         if (completions.size() == 1)
         {
@@ -1922,19 +1978,19 @@ bool fish_openSUSE_dbus_hack_hack_hack_hack(std::vector<completion_t> *args)
                         val.resize(last_good + 1);
 
                     args->clear();
-                    args->push_back(completion_t(L"set"));
+                    append_completion(*args, L"set");
                     if (key == L"DBUS_SESSION_BUS_ADDRESS")
-                        args->push_back(completion_t(L"-x"));
-                    args->push_back(completion_t(key));
-                    args->push_back(completion_t(val));
+                        append_completion(*args, L"-x");
+                    append_completion(*args, key);
+                    append_completion(*args, val);
                     result = true;
                 }
                 else if (string_prefixes_string(L"export DBUS_SESSION_BUS_ADDRESS;", cmd))
                 {
                     /* Nothing, we already exported it */
                     args->clear();
-                    args->push_back(completion_t(L"echo"));
-                    args->push_back(completion_t(L"-n"));
+                    append_completion(*args, L"echo");
+                    append_completion(*args, L"-n");
                     result = true;
                 }
             }

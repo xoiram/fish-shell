@@ -14,6 +14,7 @@
 
 
 #include <wchar.h>
+#include <stdint.h>
 
 #include "util.h"
 #include "common.h"
@@ -121,10 +122,10 @@ public:
        The COMPLETE_NO_CASE can be used to signal that this completion
        is case insensitive.
     */
-    int flags;
+    complete_flags_t flags;
 
     /* Construction. Note: defining these so that they are not inlined reduces the executable size. */
-    completion_t(const wcstring &comp, const wcstring &desc = L"", string_fuzzy_match_t match = string_fuzzy_match_t(fuzzy_match_exact), int flags_val = 0);
+    completion_t(const wcstring &comp, const wcstring &desc = wcstring(), string_fuzzy_match_t match = string_fuzzy_match_t(fuzzy_match_exact), complete_flags_t flags_val = 0);
     completion_t(const completion_t &);
     completion_t &operator=(const completion_t &);
 
@@ -216,14 +217,11 @@ void complete_remove(const wchar_t *cmd,
                      const wchar_t *long_opt);
 
 
-/** Find all completions of the command cmd, insert them into out. If to_load is
- * not NULL, append all commands that we would autoload, but did not (presumably
- * because this is not the main thread)
+/** Find all completions of the command cmd, insert them into out.
  */
 void complete(const wcstring &cmd,
               std::vector<completion_t> &comp,
-              completion_request_flags_t flags,
-              wcstring_list_t *to_load = NULL);
+              completion_request_flags_t flags);
 
 /**
    Print a list of all current completions into the string.
@@ -271,7 +269,7 @@ void complete_load(const wcstring &cmd, bool reload);
    \param flags completion flags
 
 */
-void append_completion(std::vector<completion_t> &completions, const wcstring &comp, const wcstring &desc = L"", int flags = 0, string_fuzzy_match_t match = string_fuzzy_match_t(fuzzy_match_exact));
+void append_completion(std::vector<completion_t> &completions, const wcstring &comp, const wcstring &desc = wcstring(), int flags = 0, string_fuzzy_match_t match = string_fuzzy_match_t(fuzzy_match_exact));
 
 /* Function used for testing */
 void complete_set_variable_names(const wcstring_list_t *names);
